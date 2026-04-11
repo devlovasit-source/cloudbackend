@@ -16,6 +16,7 @@ from prompts.core_prompts import WARDROBE_CAPTURE_PROMPT
 
 from services.wardrobe_persistence_service import persist_selected_items
 from services import ai_gateway
+from services import hf_qwen_service
 try:
     from worker import capture_analyze_task, capture_save_selected_task, process_upload_task
 except Exception:
@@ -198,6 +199,40 @@ def _llama_detect_items(image_base64: str, *, request_id: str = "") -> List[Dict
     return [row for row in items if isinstance(row, dict)]
 
 
+def _llama_human_presence(image_base64: str, *, request_id: str = "") -> Dict[str, Any]:
+    prompt = """
+Analyze this wardrobe upload image and return STRICT JSON:
+{
+  "human_present": true or false,
+  "confidence": 0.0 to 1.0,
+  "reason": "short reason"
+}
+
+Return JSON only.
+"""
+    result, _model = ai_gateway.ollama_vision_json(
+        prompt=prompt,
+        image_base64=(image_base64 or "").split(",", 1)[1] if "," in str(image_base64 or "") else str(image_base64 or ""),
+        request_id=request_id,
+        usecase="vision",
+    )
+    if not isinstance(result, dict):
+        return {"human_present": False, "confidence": 0.0, "reason": "invalid_result"}
+
+    present = bool(result.get("human_present"))
+    try:
+        confidence = float(result.get("confidence", 0.0))
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    reason = str(result.get("reason", "")).strip()
+    return {
+        "human_present": present,
+        "confidence": confidence,
+        "reason": reason or ("detected" if present else "not_detected"),
+    }
+
+
 def _fallback_single_item(image: Image.Image) -> List[Dict[str, Any]]:
     width, height = image.size
     crop = image.crop((0, 0, width, height))
@@ -238,13 +273,42 @@ def analyze_capture(http_request: Request, request: CaptureAnalyzeRequest):
 
 
 def analyze_capture_core(user_id: str, image_base64: str, request_id: str = ""):
-    image = _decode_image_base64(image_base64)
+    source_image_base64 = image_base64
+    regen_meta: Dict[str, Any] = {
+        "human_detected": False,
+        "human_confidence": 0.0,
+        "human_reason": "",
+        "qwen_regen_attempted": False,
+        "qwen_regen_applied": False,
+        "qwen_regen_reason": "",
+    }
+
+    try:
+        human = _llama_human_presence(source_image_base64, request_id=request_id)
+        regen_meta["human_detected"] = bool(human.get("human_present", False))
+        regen_meta["human_confidence"] = float(human.get("confidence", 0.0) or 0.0)
+        regen_meta["human_reason"] = str(human.get("reason", "") or "")
+    except Exception as exc:
+        regen_meta["human_reason"] = f"human_detection_failed: {exc}"
+
+    if regen_meta["human_detected"]:
+        regen_meta["qwen_regen_attempted"] = True
+        regenerated, regen_result = hf_qwen_service.regenerate_image(
+            image_base64=source_image_base64,
+            request_id=request_id,
+        )
+        regen_meta["qwen_regen_reason"] = str((regen_result or {}).get("reason", "") or "")
+        if regenerated:
+            source_image_base64 = regenerated
+            regen_meta["qwen_regen_applied"] = True
+
+    image = _decode_image_base64(source_image_base64)
     width, height = image.size
 
     llm_items: List[Dict[str, Any]] = []
     llm_error = ""
     try:
-        llm_items = _llama_detect_items(image_base64, request_id=request_id)
+        llm_items = _llama_detect_items(source_image_base64, request_id=request_id)
     except Exception as exc:
         llm_error = str(exc)
         llm_items = []
@@ -310,6 +374,12 @@ def analyze_capture_core(user_id: str, image_base64: str, request_id: str = ""):
         "meta": {
             "pipeline": "single_shot_llama" if llm_items else "single_shot_fallback",
             "llm_error": llm_error or None,
+            "human_detected": regen_meta.get("human_detected", False),
+            "human_confidence": regen_meta.get("human_confidence", 0.0),
+            "human_reason": regen_meta.get("human_reason") or "",
+            "qwen_regen_attempted": regen_meta.get("qwen_regen_attempted", False),
+            "qwen_regen_applied": regen_meta.get("qwen_regen_applied", False),
+            "qwen_regen_reason": regen_meta.get("qwen_regen_reason") or "",
         },
     }
 

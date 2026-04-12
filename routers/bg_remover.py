@@ -54,6 +54,20 @@ def _resize_if_needed(base64_str, max_size=1024):
     except:
         return base64_str
 
+
+# =========================
+# ALPHA CHECK (🔥 NEW)
+# =========================
+def _has_alpha(base64_str):
+    try:
+        img_bytes = base64.b64decode(base64_str)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+        return img is not None and len(img.shape) == 3 and img.shape[2] == 4
+    except:
+        return False
+
+
 # =========================
 # REQUEST MODEL
 # =========================
@@ -66,14 +80,16 @@ class BGRemoveRequest(BaseModel):
             raise ValueError("Invalid image")
         return v
 
+
 # =========================
 # QUEUE SYSTEM
 # =========================
 task_queue = Queue()
 jobs = {}
 
+
 # =========================
-# RUNPOD CALL
+# RUNPOD CALL (🔥 FIXED)
 # =========================
 def call_runpod_batch(images):
     last_error = None
@@ -88,8 +104,14 @@ def call_runpod_batch(images):
 
             if res.ok:
                 data = res.json()
+
+                # 🔥 flexible parsing
                 if "results" in data:
                     return data["results"]
+                elif "images" in data:
+                    return data["images"]
+                elif "output" in data and "images" in data["output"]:
+                    return data["output"]["images"]
 
             last_error = f"{res.status_code}: {res.text}"
 
@@ -99,6 +121,7 @@ def call_runpod_batch(images):
         time.sleep(1.5 ** attempt)
 
     raise Exception(f"RunPod failed: {last_error}")
+
 
 # =========================
 # WORKER
@@ -111,10 +134,17 @@ def worker():
         while len(batch) < BATCH_SIZE:
             job = task_queue.get()
 
-            # cache check
+            # 🔥 CACHE
             cache_key = _hash_base64(job["image"])
             if cache_key in _BG_CACHE:
                 job["result"] = _BG_CACHE[cache_key]
+                job["done"] = True
+                task_queue.task_done()
+                continue
+
+            # 🔥 ALPHA SKIP
+            if _has_alpha(job["image"]):
+                job["result"] = job["image"]
                 job["done"] = True
                 task_queue.task_done()
                 continue
@@ -135,6 +165,11 @@ def worker():
             results = call_runpod_batch(batch)
 
             for job, result in zip(job_refs, results):
+
+                # 🔥 normalize output
+                if not result.startswith("data:image"):
+                    result = f"data:image/png;base64,{result}"
+
                 job["result"] = result
                 job["done"] = True
 
@@ -143,17 +178,19 @@ def worker():
 
         except Exception as e:
             for job in job_refs:
-                job["error"] = str(e)
+                job["error"] = f"runpod_failed: {str(e)}"
                 job["done"] = True
 
         for _ in job_refs:
             task_queue.task_done()
 
+
 # start worker
 threading.Thread(target=worker, daemon=True).start()
 
+
 # =========================
-# CLEANUP THREAD (VERY IMPORTANT)
+# CLEANUP THREAD
 # =========================
 def cleanup_worker():
     while True:
@@ -169,7 +206,9 @@ def cleanup_worker():
 
         time.sleep(30)
 
+
 threading.Thread(target=cleanup_worker, daemon=True).start()
+
 
 # =========================
 # JOB MANAGEMENT
@@ -204,7 +243,7 @@ def get_job(job_id):
     if job["error"]:
         return {
             "status": "completed",
-            "image_base64": job["image"],  # fallback to original
+            "image_base64": job["image"],
             "fallback": True
         }
 
@@ -212,6 +251,7 @@ def get_job(job_id):
         "status": "completed",
         "image_base64": job["result"]
     }
+
 
 # =========================
 # ROUTES

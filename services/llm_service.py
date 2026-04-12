@@ -1,7 +1,4 @@
 import os
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 from brain.tone.tone_engine import tone_engine
@@ -11,74 +8,27 @@ from brain.tone.tone_engine import tone_engine
 # =========================
 load_dotenv()
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api")
+# 🚫 OLLAMA DISABLED
+OLLAMA_URL = None
 
-# 🔒 SAFE MODEL CONFIG (NO GPU / HEAVY MODELS)
 DEFAULT_MODEL = "phi3"
-
-MODEL_FALLBACKS = [
-    m.strip()
-    for m in os.getenv(
-        "OLLAMA_MODEL_FALLBACKS",
-        "phi3,tinyllama",
-    ).split(",")
-    if m.strip()
-]
-
-# 🚫 HARD BLOCK HEAVY MODELS
+MODEL_FALLBACKS = []
 ALLOW_HEAVY_MODELS = False
 
-DEFAULT_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "1024"))
-DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "120"))
-
-
-def _is_heavy_model(model_name: str) -> bool:
-    m = str(model_name or "").lower()
-    heavy_markers = [":7b", ":8b", ":9b", ":13b", ":14b", ":32b", ":70b", "latest", "vl"]
-    return any(marker in m for marker in heavy_markers)
+DEFAULT_NUM_CTX = 1024
+DEFAULT_NUM_PREDICT = 120
 
 
 # =========================
-# SESSION WITH RETRIES
+# DISABLED REQUEST LAYER
 # =========================
-session = requests.Session()
-retries = Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-session.mount("http://", HTTPAdapter(max_retries=retries))
+def safe_request(*args, **kwargs):
+    return None
 
 
 # =========================
-# SAFE MODEL SELECTION
+# STYLIST GUIDANCE (UNCHANGED)
 # =========================
-def _model_candidates(requested_model: str | None) -> list[str]:
-    ordered: list[str] = []
-
-    # Always use safe default first
-    for model in [DEFAULT_MODEL, *MODEL_FALLBACKS]:
-        m = str(model or "").strip()
-        if not m:
-            continue
-
-        # 🚫 STRICT BLOCK
-        if _is_heavy_model(m):
-            continue
-
-        if m not in ordered:
-            ordered.append(m)
-
-    return ordered
-
-
-def _merged_options(incoming: dict | None) -> dict:
-    merged = {
-        "num_ctx": DEFAULT_NUM_CTX,
-        "num_predict": DEFAULT_NUM_PREDICT,
-        "temperature": 0.7,
-    }
-    if incoming:
-        merged.update(incoming)
-    return merged
-
-
 def _stylist_guidance(user_profile=None, signals=None) -> str:
     user_profile = user_profile or {}
     signals = signals or {}
@@ -109,47 +59,7 @@ User style profile:
 
 
 # =========================
-# SAFE REQUEST HANDLER
-# =========================
-def safe_request(endpoint: str, payload: dict, timeout: int = 30):
-    candidates = _model_candidates(payload.get("model"))
-    last_error = ""
-
-    for model in candidates:
-        try:
-            local_payload = dict(payload)
-            local_payload["model"] = model
-            local_payload["options"] = _merged_options(local_payload.get("options"))
-
-            response = session.post(
-                f"{OLLAMA_URL}/{endpoint}",
-                json=local_payload,
-                timeout=timeout
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, dict):
-                    data["_model_used"] = model
-                return data
-
-            last_error = f"{response.status_code}: {response.text}"
-
-            if response.status_code == 404:
-                continue
-
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    if last_error:
-        print(f"OLLAMA ERROR ({endpoint}): {last_error}")
-
-    return None
-
-
-# =========================
-# TEXT GENERATION
+# TEXT GENERATION (DISABLED)
 # =========================
 def generate_text(
     prompt: str,
@@ -159,51 +69,11 @@ def generate_text(
     model: str | None = None,
     timeout_seconds: int | None = None,
 ) -> str:
-
-    if not prompt:
-        return "none"
-
-    tone = tone_engine.build_prompt_tone(user_profile, signals)
-
-    full_prompt = f"""
-You are AHVI, a premium AI fashion stylist.
-
-Tone Instructions:
-{tone.get("tone_instruction", "")}
-
-Guidelines:
-- Be natural and human
-- Keep responses concise
-- Sound confident but not arrogant
-- Avoid robotic phrasing
-
-{_stylist_guidance(user_profile=user_profile, signals=signals)}
-
-{prompt}
-"""
-
-    payload = {
-        "model": DEFAULT_MODEL,  # 🔒 FORCE SAFE MODEL
-        "prompt": full_prompt,
-        "stream": False,
-    }
-
-    if options:
-        payload["options"] = options
-
-    data = safe_request("generate", payload, timeout=int(timeout_seconds or 30))
-
-    if not data:
-        return "none"
-
-    response = data.get("response", "").strip() or "none"
-    response = tone_engine.apply(response, user_profile=user_profile, signals=signals)
-
-    return response
+    return "none"
 
 
 # =========================
-# CHAT COMPLETION
+# CHAT COMPLETION (DISABLED)
 # =========================
 def chat_completion(
     messages: list,
@@ -213,62 +83,11 @@ def chat_completion(
     signals=None,
     timeout_seconds: int | None = None,
 ) -> str:
+    return "none"
 
-    if not messages:
-        return "I didn't catch that!"
-
-    tone = tone_engine.build_prompt_tone(user_profile, signals)
-
-    system_msg = f"""
-You are AHVI, an AI fashion stylist.
-
-Tone:
-{tone.get("tone_instruction", "")}
-
-Rules:
-- Speak naturally
-- Keep it concise
-- Be stylish and modern
-
-{_stylist_guidance(user_profile=user_profile, signals=signals)}
-"""
-
-    if system_instruction:
-        system_msg += "\n" + system_instruction[:2000]
-
-    combined_prompt = system_msg + "\n\n"
-
-    safe_messages = messages[-10:]
-
-    for msg in safe_messages:
-        role = str(msg.get("role", "user")).upper()
-        content = str(msg.get("content", ""))[:4000]
-
-        if content:
-            combined_prompt += f"{role}: {content}\n"
-
-    combined_prompt += "ASSISTANT:"
-
-    payload = {
-        "model": DEFAULT_MODEL,  # 🔒 FORCE SAFE MODEL
-        "prompt": combined_prompt,
-        "stream": False,
-    }
-
-    data = safe_request("generate", payload, timeout=int(timeout_seconds or 45))
-
-    if not data:
-        return "I'm having trouble thinking right now."
-
-    try:
-        response = data.get("response", "").strip()
-        response = tone_engine.apply(response, user_profile=user_profile, signals=signals)
-        return response or "Something went wrong."
-    except Exception:
-        return "AI response parsing failed."
 
 # =========================
-# WARDROBE FORMATTER
+# WARDROBE FORMATTER (UNCHANGED)
 # =========================
 def format_wardrobe_for_llm(items):
     if not items:
@@ -286,49 +105,24 @@ def format_wardrobe_for_llm(items):
 
 
 # =========================
-# OUTFIT EXPLANATION
+# OUTFIT EXPLANATION (SAFE FALLBACK)
 # =========================
 def generate_outfit_explanation(outfits: list, context: str = "", user_profile=None, signals=None):
-    prompt = f"""
-User wardrobe:
-{context}
-
-Outfits:
-{outfits}
-
-Explain:
-- why these outfits work
-- when to wear them
-
-Keep it short (2-3 lines).
-"""
-    return generate_text(prompt, user_profile=user_profile, signals=signals)
+    return "Clean, balanced outfit with good color coordination and versatility."
 
 
 # =========================
-# STYLE ADVICE
+# STYLE ADVICE (SAFE FALLBACK)
 # =========================
 def generate_style_advice(user_input: str, wardrobe_summary: str, user_profile=None, signals=None):
-    prompt = f"""
-User request:
-{user_input}
-
-Wardrobe:
-{wardrobe_summary}
-
-Give practical styling advice using available wardrobe.
-Keep it concise and helpful.
-"""
-    return generate_text(prompt, user_profile=user_profile, signals=signals)
+    return "Try combining complementary colors and ensure proper fit for a polished look."
 
 
 # =========================
-# SMART RESPONSE GENERATOR
+# SMART RESPONSE GENERATOR (SAFE)
 # =========================
 def generate_ai_response(user_input: str, outfits: list, wardrobe_items: list, user_profile=None, signals=None):
-    wardrobe_summary = format_wardrobe_for_llm(wardrobe_items)
-
     if outfits:
-        return generate_outfit_explanation(outfits, wardrobe_summary, user_profile=user_profile, signals=signals)
+        return generate_outfit_explanation(outfits, "", user_profile=user_profile, signals=signals)
 
-    return generate_style_advice(user_input, wardrobe_summary, user_profile=user_profile, signals=signals)
+    return generate_style_advice(user_input, "", user_profile=user_profile, signals=signals)

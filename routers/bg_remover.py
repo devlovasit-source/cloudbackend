@@ -15,7 +15,7 @@ router = APIRouter()
 # =========================
 # CONFIG
 # =========================
-RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net//remove-bg/batch"
+RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg/batch"
 MAX_RETRIES = 3
 TIMEOUT = 20
 BATCH_SIZE = 4

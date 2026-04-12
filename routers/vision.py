@@ -4,6 +4,10 @@ from collections import Counter
 
 import cv2
 import numpy as np
+import requests
+
+RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net/api/background/remove-bg"
+
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sklearn.cluster import KMeans
@@ -20,11 +24,6 @@ try:
 except Exception:
     vision_analyze_task = None
 
-try:
-    from routers.bg_remover import BGRemoveRequest, remove_background_sync
-except Exception:
-    BGRemoveRequest = None
-    remove_background_sync = None
 
 router = APIRouter()
 
@@ -89,19 +88,37 @@ def _input_has_alpha(image_base64: str) -> bool:
 
 
 def _remove_bg_first(image_base64: str):
+    # If already transparent → skip
     if _input_has_alpha(image_base64):
         return image_base64, True, "input_already_has_alpha"
-    if BGRemoveRequest is None or remove_background_sync is None:
-        return image_base64, False, "bg_remover_unavailable"
-    try:
-        req = BGRemoveRequest(image_base64=image_base64)
-        result = remove_background_sync(req.image_base64)
-        if isinstance(result, dict) and result.get("success") and result.get("image_base64"):
-            processed = _to_png_data_uri(result.get("image_base64"))
-            return processed, bool(result.get("bg_removed", True)), result.get("fallback_reason")
-        return image_base64, False, "bg_remove_no_image"
-    except Exception as exc:
-        return image_base64, False, f"bg_remove_failed: {exc}"
+
+    for attempt in range(2):  # 🔁 retry once
+        try:
+            response = requests.post(
+                RUNPOD_URL,
+                json={"image_base64": image_base64},
+                timeout=20
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+
+                if data.get("success") and data.get("image_base64"):
+                    processed = _to_png_data_uri(data["image_base64"])
+                    return processed, True, None
+
+                # 🔍 log bad response
+                print("[BG ERROR - BAD RESPONSE]", data)
+
+            else:
+                # 🔍 log HTTP issue
+                print("[BG ERROR - STATUS]", response.status_code, response.text)
+
+        except Exception as e:
+            print(f"[BG EXCEPTION attempt {attempt+1}]", str(e))
+
+    # ❌ final fallback
+    return image_base64, False, "runpod_failed"
 
 
 def get_dominant_color(cv_image, k=3):

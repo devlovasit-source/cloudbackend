@@ -1,17 +1,17 @@
 import base64
 import os
+import time
+import hashlib
+import requests
 from collections import Counter
 
 import cv2
 import numpy as np
-import requests
-
-RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg"
-
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sklearn.cluster import KMeans
 
+from services import ai_gateway
 from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_base64
 from services.image_fingerprint import compute_pixel_hash_from_base64
@@ -23,8 +23,49 @@ try:
 except Exception:
     vision_analyze_task = None
 
+try:
+    from routers.bg_remover import BGRemoveRequest, remove_background_sync
+except Exception:
+    BGRemoveRequest = None
+    remove_background_sync = None
 
 router = APIRouter()
+
+
+# =========================
+# ENV HELPERS
+# =========================
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _vision_enable_similarity() -> bool:
+    return _env_bool("VISION_ANALYZE_ENABLE_SIMILARITY", False)
+
+
+def _duplicate_threshold() -> float:
+    try:
+        val = float(os.getenv("WARDROBE_DUPLICATE_THRESHOLD", "0.97"))
+        return val if 0.0 < val <= 1.0 else 0.97
+    except Exception:
+        return 0.97
+
+
+def _pixel_duplicate_distance() -> int:
+    try:
+        val = int(os.getenv("WARDROBE_PIXEL_DUPLICATE_DISTANCE", "6"))
+        return max(0, min(val, 64))
+    except Exception:
+        return 6
+
+
+def _image_duplicate_threshold() -> float:
+    try:
+        val = float(os.getenv("WARDROBE_IMAGE_DUPLICATE_THRESHOLD", "0.985"))
+        return val if 0.0 < val <= 1.0 else 0.985
+    except Exception:
+        return 0.985
 
 
 class ImageAnalyzeRequest(BaseModel):
@@ -48,7 +89,7 @@ def _to_png_data_uri(base64_text: str) -> str:
 def _input_has_alpha(image_base64: str) -> bool:
     try:
         b64 = _normalize_base64_for_model(image_base64)
-        img_data = base64.b64decode(b64)
+        img_data = base64.b64decode(b64, validate=True)
         np_arr = np.frombuffer(img_data, np.uint8)
         decoded = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
         return bool(decoded is not None and decoded.ndim == 3 and decoded.shape[2] == 4)
@@ -57,166 +98,488 @@ def _input_has_alpha(image_base64: str) -> bool:
 
 
 # =========================
-# BG REMOVE
+# BG OPTIMIZATION HELPERS
+# =========================
+_BG_CACHE = {}
+
+
+def _hash_base64(b64: str) -> str:
+    return hashlib.md5(b64.encode()).hexdigest()
+
+
+def _resize_if_needed(base64_str: str, max_size=1024):
+    try:
+        img_bytes = base64.b64decode(base64_str)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return base64_str
+
+        h, w = img.shape[:2]
+        if max(h, w) <= max_size:
+            return base64_str
+
+        scale = max_size / max(h, w)
+        resized = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+        _, buffer = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        return base64.b64encode(buffer).decode()
+
+    except Exception:
+        return base64_str
+
+
+# =========================
+# BG REMOVE (OPTIMIZED)
 # =========================
 def _remove_bg_first(image_base64: str):
+    base64_clean = _normalize_base64_for_model(image_base64)
+
+    # 1. Skip if already alpha
     if _input_has_alpha(image_base64):
-        return image_base64, True, "input_already_has_alpha"
+        return image_base64, True, "already_alpha"
 
+    # 2. Resize for performance
+    base64_clean = _resize_if_needed(base64_clean)
+
+    # 3. Cache
+    cache_key = _hash_base64(base64_clean)
+    if cache_key in _BG_CACHE:
+        return _BG_CACHE[cache_key], True, "cache_hit"
+
+    # 4. Local BG remover (Railway)
+    if BGRemoveRequest is not None and remove_background_sync is not None:
+        try:
+            req = BGRemoveRequest(image_base64=base64_clean)
+            result = remove_background_sync(req.image_base64)
+
+            if isinstance(result, dict) and result.get("success") and result.get("image_base64"):
+                processed = _to_png_data_uri(result.get("image_base64"))
+                _BG_CACHE[cache_key] = processed
+                return processed, True, "local_success"
+
+        except Exception as exc:
+            print(f"[BG] local failed: {exc}")
+
+    # 5. RunPod (GPU)
+    RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg"
+
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                RUNPOD_URL,
+                json={"image_base64": base64_clean},
+                timeout=10
+            )
+
+            if response.ok:
+                data = response.json()
+                if data.get("success") and data.get("image_base64"):
+                    processed = _to_png_data_uri(data["image_base64"])
+                    _BG_CACHE[cache_key] = processed
+                    return processed, True, f"runpod_success_{attempt+1}"
+
+        except requests.exceptions.Timeout:
+            print(f"[BG] timeout attempt {attempt+1}")
+        except Exception as e:
+            print(f"[BG] error attempt {attempt+1}: {e}")
+
+    # 6. rembg fallback
     try:
-        response = requests.post(
-            RUNPOD_URL,
-            json={"image_base64": image_base64},
-            timeout=20
-        )
+        from rembg import remove
 
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("success") and data.get("image_base64"):
-                processed = _to_png_data_uri(data["image_base64"])
-                return processed, True, None
+        img_bytes = base64.b64decode(base64_clean)
+        output = remove(img_bytes)
+
+        encoded = base64.b64encode(output).decode()
+        processed = f"data:image/png;base64,{encoded}"
+
+        _BG_CACHE[cache_key] = processed
+        return processed, True, "rembg_fallback"
 
     except Exception as e:
-        print("[BG ERROR]", str(e))
+        print("[BG] rembg failed:", e)
 
-    return image_base64, False, "runpod_failed"
+    # 7. Final fallback
+    return image_base64, False, "all_failed"
 
 
 # =========================
 # COLOR
 # =========================
-def get_dominant_color(cv_image):
+def get_dominant_color(cv_image, k=3):
     try:
         image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, (100, 100))
-        pixels = image.reshape((-1, 3))
+        h, w, _ = image.shape
+        crop_h, crop_w = int(h * 0.25), int(w * 0.25)
+        center_image = image[crop_h:h - crop_h, crop_w:w - crop_w]
+        center_image = cv2.resize(center_image, (100, 100), interpolation=cv2.INTER_AREA)
 
-        kmeans = KMeans(n_clusters=3, n_init=10).fit(pixels)
-        dominant = kmeans.cluster_centers_[Counter(kmeans.labels_).most_common(1)[0][0]]
+        hsv_image = cv2.cvtColor(center_image, cv2.COLOR_RGB2HSV)
+        pixels_rgb = center_image.reshape((-1, 3))
+        pixels_hsv = hsv_image.reshape((-1, 3))
 
-        r, g, b = [int(x) for x in dominant]
-        return "#{:02x}{:02x}{:02x}".format(r, g, b).upper()
+        mask = (pixels_hsv[:, 1] > 20) & (pixels_hsv[:, 2] > 70) & (pixels_hsv[:, 2] < 245)
+        filtered_rgb = pixels_rgb[mask]
+        if len(filtered_rgb) < 100:
+            filtered_rgb = pixels_rgb[(pixels_hsv[:, 2] > 30) & (pixels_hsv[:, 2] < 250)]
+            if len(filtered_rgb) == 0:
+                filtered_rgb = pixels_rgb
+
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10).fit(filtered_rgb)
+        dominant_rgb = [int(x) for x in kmeans.cluster_centers_[Counter(kmeans.labels_).most_common(1)[0][0]]]
+        return "#{:02x}{:02x}{:02x}".format(*dominant_rgb).upper()
     except Exception:
         return "#000000"
 
 
 def _hex_to_color_name(hex_color: str) -> str:
     try:
-        r = int(hex_color[1:3], 16)
-        g = int(hex_color[3:5], 16)
-        b = int(hex_color[5:7], 16)
-    except:
+        color = hex_color.lstrip("#")
+        r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    except Exception:
         return "Multicolor"
 
     if max(r, g, b) < 40:
         return "Black"
     if min(r, g, b) > 220:
         return "White"
-    if g > r and g > b:
-        return "Green"
-    if b > r and b > g:
-        return "Blue"
-    if r > g and r > b:
+    if abs(r - g) < 14 and abs(g - b) < 14:
+        return "Gray"
+    if r > 180 and g < 110 and b < 110:
         return "Red"
-
+    if r > 170 and g > 120 and b < 90:
+        return "Orange"
+    if r > 170 and g > 170 and b < 90:
+        return "Yellow"
+    if g > 150 and r < 130 and b < 130:
+        return "Green"
+    if b > 150 and r < 130 and g < 150:
+        return "Blue"
+    if r > 150 and b > 150 and g < 130:
+        return "Purple"
+    if r > 140 and g > 100 and b > 70:
+        return "Brown"
     return "Multicolor"
 
 
-# =========================
-# SHAPE CLASSIFIER
-# =========================
-def _infer_garment_hint(decoded_img):
-    h, w = decoded_img.shape[:2]
-    ratio = h / w
+# Emergency fallbacks used only when model output is missing fields.
+def _extract_foreground_mask(decoded_img) -> np.ndarray | None:
+    try:
+        if decoded_img is None:
+            return None
+        if decoded_img.ndim == 3 and decoded_img.shape[2] == 4:
+            return decoded_img[:, :, 3] > 18
 
-    if ratio > 1.8:
-        return "Bottoms", "Trousers"
-    if ratio > 1.2:
-        return "Tops", "Shirt"
-    return "Tops", "T-Shirt"
+        bgr = decoded_img if decoded_img.ndim == 3 else None
+        if bgr is None:
+            return None
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        maxc, minc = rgb.max(axis=2), rgb.min(axis=2)
+        near_white = (rgb[:, :, 0] >= 236) & (rgb[:, :, 1] >= 236) & (rgb[:, :, 2] >= 236) & ((maxc - minc) <= 20)
+        saturated = hsv[:, :, 1] > 18
+        mask = (~near_white) | saturated
+
+        mask_u8 = mask.astype(np.uint8) * 255
+        kernel = np.ones((3, 3), np.uint8)
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
+        final_mask = mask_u8 > 0
+        return final_mask if final_mask.sum() >= 200 else None
+    except Exception:
+        return None
 
 
-def _infer_pattern(cv_image):
-    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-    return "checked" if np.mean(edges) > 10 else "plain"
+def _infer_garment_hint(decoded_img) -> tuple[str, str]:
+    mask = _extract_foreground_mask(decoded_img)
+    if mask is None:
+        return ("Tops", "Shirt")
+    ys, xs = np.where(mask)
+    if len(xs) == 0 or len(ys) == 0:
+        return ("Tops", "Shirt")
+    box_w, box_h = max(1, xs.max() - xs.min() + 1), max(1, ys.max() - ys.min() + 1)
+    if float(box_h) / float(box_w) > 1.15:
+        return ("Bottoms", "Trousers")
+    return ("Tops", "Shirt")
 
 
-# =========================
-# CORE OUTPUT
-# =========================
-def _build_output(color_hex, decoded, cv_image):
-    category, sub_category = _infer_garment_hint(decoded)
+def _infer_pattern(cv_image) -> str:
+    try:
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 60, 160)
+        return "checked" if (float(np.count_nonzero(edges)) / float(edges.size)) > 0.09 else "plain"
+    except Exception:
+        return "plain"
 
-    # consistency fix
-    if sub_category.lower() in ["shirt", "t-shirt"]:
+
+MASTER_VISION_PROMPT = """
+You are a high-end fashion stylist vision classifier.
+Analyze the garment image and return STRICT JSON with this exact shape:
+{
+  "name": "Highly descriptive name including the target gender if apparent (e.g., 'Men's Plain White Shirt', 'Women's Floral Midi Dress', 'Unisex Black Hoodie') if possible try to give in clour with sub category",
+  "category": "Main category (Choose ONE: Tops, Bottoms, Dresses, Outerwear, Footwear, Bags, Accessories, Jewelry, Indian Wear)",
+  "sub_category": "Specific type (e.g., T-Shirt, Chinos, Sneakers, Watch, Kurta)",
+  "pattern": "one short value like plain/striped/checked/floral/graphic/printed/textured/denim",
+  "occasions": ["list 5 to 8 specific occasions where this item can be worn"]
+}
+
+Rules:
+- Accurately detect Footwear, Bags, and Accessories if applicable.
+- Return EXACTLY 5 to 8 specific, highly creative occasions.
+- Use lowercase strings for pattern and occasions.
+"""
+
+
+def _clean_text(val):
+    return str(val).strip() if val else ""
+
+
+def _normalize_occasions(raw_occ) -> list[str]:
+    if isinstance(raw_occ, str):
+        raw_occ = [x.strip() for x in raw_occ.split(",")]
+    if not isinstance(raw_occ, list):
+        return []
+    out = []
+    seen = set()
+    for item in raw_occ:
+        text = _clean_text(item).lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+_VALID_CATEGORIES = {
+    "Tops",
+    "Bottoms",
+    "Footwear",
+    "Outerwear",
+    "Dresses",
+    "Bags",
+    "Accessories",
+    "Jewelry",
+    "Indian Wear",
+}
+
+
+def _shape_vision_output(raw_data, color_hex: str, decoded_img, cv_image) -> dict:
+    data = dict(raw_data) if isinstance(raw_data, dict) else {}
+
+    name = _clean_text(data.get("name") or data.get("title"))
+    category = _clean_text(data.get("category") or data.get("main_category")).title()
+    sub_category = _clean_text(data.get("sub_category") or data.get("subcategory") or data.get("subType")).title()
+    pattern = _clean_text(data.get("pattern") or data.get("texture")).lower()
+    occasions = _normalize_occasions(data.get("occasions") or data.get("occasion"))
+
+    if not category or not sub_category:
+        print("[vision] AI missing category/sub_category -> using emergency geometry fallback")
+        fallback_cat, fallback_sub = _infer_garment_hint(decoded_img)
+        category = category or fallback_cat
+        sub_category = sub_category or fallback_sub
+
+    if not name:
+        name = f"{_hex_to_color_name(color_hex)} {sub_category}"
+
+    if not pattern:
+        print("[vision] AI missing pattern -> using emergency edge fallback")
+        pattern = _infer_pattern(cv_image)
+
+    if len(occasions) < 3:
+        print("[vision] AI missing occasions -> using emergency generic fallback")
+        occasions = ["daily wear", "casual outing", "weekend", "travel", "office", "hangout"]
+
+    if category not in _VALID_CATEGORIES:
         category = "Tops"
-    if sub_category.lower() in ["trousers", "jeans", "pants"]:
-        category = "Bottoms"
-
-    color_name = _hex_to_color_name(color_hex)
 
     return {
-        "name": f"{color_name} {sub_category}",
+        "name": name,
         "category": category,
         "sub_category": sub_category,
-        "pattern": _infer_pattern(cv_image),
-        "occasions": ["casual outing", "daily wear", "weekend", "travel", "office"],
+        "pattern": pattern,
+        "occasions": occasions[:8],
         "color_code": color_hex,
     }
 
 
-# =========================
-# MAIN CORE
-# =========================
+@router.post("/analyze-image")
+def analyze_image(request: ImageAnalyzeRequest):
+    try:
+        return vision_analyze_core(request.image_base64, request.userId)
+    except HTTPException as exc:
+        # Hardening: avoid breaking wardrobe flow when vision model stack is unstable.
+        # Return a safe fallback garment classification instead of bubbling failure.
+        base64_data = _normalize_base64_for_model(request.image_base64)
+        fallback = {
+            "name": "Neutral Shirt",
+            "category": "Tops",
+            "sub_category": "Shirt",
+            "pattern": "plain",
+            "occasions": ["daily wear", "casual outing", "weekend", "travel", "office"],
+            "color_code": "#888888",
+            "userId": request.userId or "demo_user",
+        }
+        return {
+            "success": True,
+            "data": fallback,
+            "processed_image_base64": base64_data,
+            "similar_items": [],
+            "meta": {
+                "bg_removed": False,
+                "bg_fallback_reason": f"vision_fallback_http_{exc.status_code}",
+                "llm_fallback": True,
+                "vision_model_used": None,
+                "similarity_enabled": False,
+                "embedding_created": False,
+                "similar_items_found": 0,
+                "probable_duplicate": False,
+                "fallback_reason": str(exc.detail),
+            },
+        }
+    except Exception as exc:
+        base64_data = _normalize_base64_for_model(request.image_base64)
+        fallback = {
+            "name": "Neutral Shirt",
+            "category": "Tops",
+            "sub_category": "Shirt",
+            "pattern": "plain",
+            "occasions": ["daily wear", "casual outing", "weekend", "travel", "office"],
+            "color_code": "#888888",
+            "userId": request.userId or "demo_user",
+        }
+        return {
+            "success": True,
+            "data": fallback,
+            "processed_image_base64": base64_data,
+            "similar_items": [],
+            "meta": {
+                "bg_removed": False,
+                "bg_fallback_reason": "vision_fallback_exception",
+                "llm_fallback": True,
+                "vision_model_used": None,
+                "similarity_enabled": False,
+                "embedding_created": False,
+                "similar_items_found": 0,
+                "probable_duplicate": False,
+                "fallback_reason": str(exc),
+            },
+        }
+
+
 def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
-    image_base64, bg_removed, bg_reason = _remove_bg_first(image_base64)
+    vision_input_base64, bg_removed, bg_fallback_reason = _remove_bg_first(image_base64)
 
-    base64_data = _normalize_base64_for_model(image_base64)
+    base64_data = _normalize_base64_for_model(vision_input_base64)
+    try:
+        img_data = base64.b64decode(base64_data, validate=True)
+        if len(img_data) > 12 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="image payload too large (max 12MB)")
+        np_arr = np.frombuffer(img_data, np.uint8)
+        decoded = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+        if decoded is None:
+            raise HTTPException(status_code=400, detail="invalid image payload")
 
-    img_data = base64.b64decode(base64_data)
-    np_arr = np.frombuffer(img_data, np.uint8)
-    decoded = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        cv_image = (
+            cv2.cvtColor(decoded, cv2.COLOR_BGRA2BGR)
+            if (decoded.ndim == 3 and decoded.shape[2] == 4)
+            else (decoded if decoded.ndim == 3 else cv2.imdecode(np_arr, cv2.IMREAD_COLOR))
+        )
+        if cv_image is None:
+            raise HTTPException(status_code=400, detail="invalid image payload")
+        extracted_color_hex = get_dominant_color(cv_image)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image payload: {str(e)}")
 
-    if decoded is None:
-        raise HTTPException(status_code=400, detail="invalid image")
+    llm_fallback = False
+    model_used = None
+    try:
+        final_data, model_used = ai_gateway.ollama_vision_json(
+            prompt=MASTER_VISION_PROMPT,
+            image_base64=base64_data,
+            usecase="vision",
+        )
+    except Exception as e:
+        print(f"[vision] AI Vision Error: {e}")
+        llm_fallback = True
+        final_data = {}
 
-    cv_image = decoded
-    color_hex = get_dominant_color(cv_image)
-
-    final_data = _build_output(color_hex, decoded, cv_image)
+    final_data = _shape_vision_output(final_data, extracted_color_hex, decoded, cv_image)
     final_data["userId"] = user_id
+
+    image_duplicate = {"checked": False, "is_duplicate": False, "id": None, "score": 0.0}
+    pixel_duplicate = {"checked": False, "is_duplicate": False, "id": None, "distance": None}
+    vector = None
+    similar_items = []
+    image_vector = []
+    pixel_hash = ""
+    image_duplicate_threshold = _image_duplicate_threshold()
+    pixel_max_distance = _pixel_duplicate_distance()
+
+    if _vision_enable_similarity():
+        try:
+            vector = encode_metadata(final_data)
+            similar_items = qdrant_service.search_similar(vector, user_id, limit=5)
+        except Exception as e:
+            print(f"[vision] Similarity metadata search error: {e}")
+
+        image_vector = encode_image_base64(vision_input_base64)
+        if image_vector:
+            try:
+                image_duplicate = qdrant_service.find_image_duplicate(
+                    image_vector, user_id, threshold=image_duplicate_threshold
+                )
+            except Exception as e:
+                print(f"[vision] Image duplicate check error: {e}")
+
+        pixel_hash = compute_pixel_hash_from_base64(vision_input_base64)
+        if pixel_hash:
+            try:
+                pixel_duplicate = qdrant_service.find_pixel_duplicate(
+                    user_id, pixel_hash, max_distance=pixel_max_distance
+                )
+            except Exception as e:
+                print(f"[vision] Pixel duplicate check error: {e}")
+
+    top_similarity_score = float(similar_items[0].get("score") or 0.0) if similar_items else 0.0
+    probable_duplicate = bool(
+        image_duplicate.get("is_duplicate")
+        or pixel_duplicate.get("is_duplicate")
+        or top_similarity_score >= _duplicate_threshold()
+    )
 
     return {
         "success": True,
         "data": final_data,
-        "processed_image_base64": image_base64,
-        "similar_items": [],
+        "processed_image_base64": vision_input_base64,
+        "similar_items": similar_items,
         "meta": {
             "bg_removed": bg_removed,
-            "bg_fallback_reason": bg_reason,
-            "llm_fallback": True,
-            "vision_model_used": None,
+            "bg_fallback_reason": bg_fallback_reason,
+            "llm_fallback": llm_fallback,
+            "vision_model_used": model_used,
+            "similarity_enabled": _vision_enable_similarity(),
+            "embedding_created": vector is not None,
+            "similar_items_found": len(similar_items),
+            "image_duplicate_checked": bool(image_duplicate.get("checked")),
+            "image_duplicate_threshold": image_duplicate_threshold,
+            "image_duplicate_score": float(image_duplicate.get("score") or 0.0),
+            "pixel_duplicate_checked": bool(pixel_duplicate.get("checked")),
+            "pixel_duplicate_distance": pixel_duplicate.get("distance"),
+            "pixel_duplicate_max_distance": pixel_max_distance,
+            "pixel_hash": pixel_hash or None,
+            "probable_duplicate": probable_duplicate,
         },
     }
 
 
-# =========================
-# ROUTE
-# =========================
-@router.post("/analyze-image")
-def analyze_image(request: ImageAnalyzeRequest):
-    return vision_analyze_core(request.image_base64, request.userId)
-
-
-# =========================
-# ASYNC (UNCHANGED)
-# =========================
 @router.post("/analyze-image/async", status_code=status.HTTP_202_ACCEPTED)
 def analyze_image_async(http_request: Request, request: ImageAnalyzeRequest):
     if vision_analyze_task is None:
         raise HTTPException(status_code=503, detail="Worker not configured")
-
     task_id = enqueue_task(
         task_func=vision_analyze_task,
         args=[request.image_base64, request.userId],
@@ -224,5 +587,4 @@ def analyze_image_async(http_request: Request, request: ImageAnalyzeRequest):
         kind="vision_analyze",
         user_id=request.userId,
     )
-
     return {"success": True, "status": "queued", "task_id": task_id}

@@ -14,7 +14,7 @@ load_dotenv()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api")
 
 # 🔒 SAFE MODEL CONFIG (NO GPU / HEAVY MODELS)
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "phi3")
+DEFAULT_MODEL = "phi3"
 
 MODEL_FALLBACKS = [
     m.strip()

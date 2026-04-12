@@ -203,8 +203,7 @@ def chat_completion(
 
     tone = tone_engine.build_prompt_tone(user_profile, signals)
 
-    formatted_messages = []
-
+    # 🧠 Build system prompt
     system_msg = f"""
 You are AHVI, an AI fashion stylist.
 
@@ -222,38 +221,38 @@ Rules:
     if system_instruction:
         system_msg += "\n" + system_instruction[:2000]
 
-    formatted_messages.append({"role": "system", "content": system_msg})
+    # 🧠 Convert messages → prompt (CRITICAL FIX)
+    combined_prompt = system_msg + "\n\n"
 
     safe_messages = messages[-10:]
 
     for msg in safe_messages:
-        role = str(msg.get("role", "user")).lower()
-        if role not in ["user", "assistant", "system"]:
-            role = "assistant"
-
+        role = str(msg.get("role", "user")).upper()
         content = str(msg.get("content", ""))[:4000]
 
         if content:
-            formatted_messages.append({"role": role, "content": content})
+            combined_prompt += f"{role}: {content}\n"
 
+    combined_prompt += "ASSISTANT:"
+
+    # ✅ Use generate (NOT chat)
     payload = {
         "model": model or DEFAULT_MODEL,
-        "messages": formatted_messages,
+        "prompt": combined_prompt,
         "stream": False,
     }
 
-    data = safe_request("chat", payload, timeout=int(timeout_seconds or 45))
+    data = safe_request("generate", payload, timeout=int(timeout_seconds or 45))
 
     if not data:
         return "I'm having trouble thinking right now. Try again in a moment."
 
     try:
-        response = data.get("message", {}).get("content", "").strip()
+        response = data.get("response", "").strip()
         response = tone_engine.apply(response, user_profile=user_profile, signals=signals)
         return response or "Something went wrong."
     except Exception:
         return "AI response parsing failed."
-
 
 # =========================
 # WARDROBE FORMATTER

@@ -12,24 +12,31 @@ from brain.tone.tone_engine import tone_engine
 load_dotenv()
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api")
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+# 🔒 SAFE MODEL CONFIG (NO GPU / HEAVY MODELS)
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "phi3")
+
 MODEL_FALLBACKS = [
     m.strip()
     for m in os.getenv(
         "OLLAMA_MODEL_FALLBACKS",
-        "llama3.1:latest,llama3.1",
+        "phi3,tinyllama",
     ).split(",")
     if m.strip()
 ]
-ALLOW_HEAVY_MODELS = os.getenv("OLLAMA_ALLOW_HEAVY_MODELS", "false").lower() in {"1", "true", "yes"}
+
+# 🚫 HARD BLOCK HEAVY MODELS
+ALLOW_HEAVY_MODELS = False
+
 DEFAULT_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "1024"))
-DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "220"))
+DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "120"))
 
 
 def _is_heavy_model(model_name: str) -> bool:
     m = str(model_name or "").lower()
     heavy_markers = [":7b", ":8b", ":9b", ":13b", ":14b", ":32b", ":70b", "latest", "vl"]
     return any(marker in m for marker in heavy_markers)
+
 
 # =========================
 # SESSION WITH RETRIES
@@ -39,24 +46,25 @@ retries = Retry(total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 50
 session.mount("http://", HTTPAdapter(max_retries=retries))
 
 
+# =========================
+# SAFE MODEL SELECTION
+# =========================
 def _model_candidates(requested_model: str | None) -> list[str]:
     ordered: list[str] = []
-    requested = str(requested_model or "").strip()
-    if requested and (ALLOW_HEAVY_MODELS or not _is_heavy_model(requested)):
-        first_model = requested
-    else:
-        first_model = DEFAULT_MODEL
 
-    for index, model in enumerate([first_model, *MODEL_FALLBACKS]):
+    # Always use safe default first
+    for model in [DEFAULT_MODEL, *MODEL_FALLBACKS]:
         m = str(model or "").strip()
         if not m:
             continue
-        # Always honor the configured first model (DEFAULT_MODEL/requested),
-        # then filter heavy fallback models when disabled.
-        if index > 0 and not ALLOW_HEAVY_MODELS and _is_heavy_model(m):
+
+        # 🚫 STRICT BLOCK
+        if _is_heavy_model(m):
             continue
+
         if m not in ordered:
             ordered.append(m)
+
     return ordered
 
 
@@ -112,7 +120,12 @@ def safe_request(endpoint: str, payload: dict, timeout: int = 30):
             local_payload = dict(payload)
             local_payload["model"] = model
             local_payload["options"] = _merged_options(local_payload.get("options"))
-            response = session.post(f"{OLLAMA_URL}/{endpoint}", json=local_payload, timeout=timeout)
+
+            response = session.post(
+                f"{OLLAMA_URL}/{endpoint}",
+                json=local_payload,
+                timeout=timeout
+            )
 
             if response.status_code == 200:
                 data = response.json()
@@ -121,8 +134,8 @@ def safe_request(endpoint: str, payload: dict, timeout: int = 30):
                 return data
 
             last_error = f"{response.status_code}: {response.text}"
-            # Try next model when model is missing.
-            if response.status_code == 404 and "not found" in response.text.lower():
+
+            if response.status_code == 404:
                 continue
 
         except Exception as e:
@@ -131,11 +144,12 @@ def safe_request(endpoint: str, payload: dict, timeout: int = 30):
 
     if last_error:
         print(f"OLLAMA ERROR ({endpoint}): {last_error}")
+
     return None
 
 
 # =========================
-# TONE-AWARE TEXT GENERATION
+# TEXT GENERATION
 # =========================
 def generate_text(
     prompt: str,
@@ -145,6 +159,7 @@ def generate_text(
     model: str | None = None,
     timeout_seconds: int | None = None,
 ) -> str:
+
     if not prompt:
         return "none"
 
@@ -168,7 +183,7 @@ Guidelines:
 """
 
     payload = {
-        "model": model or DEFAULT_MODEL,
+        "model": DEFAULT_MODEL,  # 🔒 FORCE SAFE MODEL
         "prompt": full_prompt,
         "stream": False,
     }
@@ -183,6 +198,7 @@ Guidelines:
 
     response = data.get("response", "").strip() or "none"
     response = tone_engine.apply(response, user_profile=user_profile, signals=signals)
+
     return response
 
 
@@ -203,7 +219,6 @@ def chat_completion(
 
     tone = tone_engine.build_prompt_tone(user_profile, signals)
 
-    # 🧠 Build system prompt
     system_msg = f"""
 You are AHVI, an AI fashion stylist.
 
@@ -221,7 +236,6 @@ Rules:
     if system_instruction:
         system_msg += "\n" + system_instruction[:2000]
 
-    # 🧠 Convert messages → prompt (CRITICAL FIX)
     combined_prompt = system_msg + "\n\n"
 
     safe_messages = messages[-10:]
@@ -235,9 +249,8 @@ Rules:
 
     combined_prompt += "ASSISTANT:"
 
-    # ✅ Use generate (NOT chat)
     payload = {
-        "model": model or DEFAULT_MODEL,
+        "model": DEFAULT_MODEL,  # 🔒 FORCE SAFE MODEL
         "prompt": combined_prompt,
         "stream": False,
     }
@@ -245,7 +258,7 @@ Rules:
     data = safe_request("generate", payload, timeout=int(timeout_seconds or 45))
 
     if not data:
-        return "I'm having trouble thinking right now. Try again in a moment."
+        return "I'm having trouble thinking right now."
 
     try:
         response = data.get("response", "").strip()

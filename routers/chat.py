@@ -1,12 +1,12 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any
-from services.router import classify_intent
 from services.light_chat import lightweight_chat
 import re
 import os
 import logging
-
+import time
+import concurrent.futures
 
 from deep_translator import GoogleTranslator
 
@@ -30,6 +30,23 @@ from services.weather_service import get_hourly_weather
 router = APIRouter()
 logger = logging.getLogger("ahvi.routers.chat")
 
+_CHAT_CACHE = {}
+_WEATHER_CACHE = {}
+
+def _cache_key(text, user_id):
+    return f"{user_id}:{text.lower().strip()}"
+
+def _get_cached(cache, key, ttl=60):
+    item = cache.get(key)
+    if not item:
+        return None
+    if time.time() - item["time"] > ttl:
+        del cache[key]
+        return None
+    return item["value"]
+
+def _set_cache(cache, key, value):
+    cache[key] = {"value": value, "time": time.time()}
 
 def _build_history(messages: List["Message"]) -> List[Dict[str, Any]]:
     history: List[Dict[str, Any]] = []
@@ -106,6 +123,19 @@ def _fast_wardrobe_count_response(user_id: str, query_text: str) -> Dict[str, An
         "audio_job_id": "offline",
     }
 
+def _detect_mode(text: str) -> str:
+    t = text.lower().strip()
+
+    if any(k in t for k in ["wear","outfit","dress","style","clothes","wardrobe","look"]):
+        return "fashion"
+
+    if t in ["hi","hello","hey"]:
+        return "greeting"
+
+    if any(k in t for k in ["how are","what is","who is","tell me","why","joke","explain"]):
+        return "casual"
+
+    return "fashion"
 
 # -------------------------
 # MODELS
@@ -159,42 +189,45 @@ class DailyCardsRequest(BaseModel):
     user_profile: Dict[str, Any] = Field(default_factory=dict)
     current_memory: Any = Field(default_factory=dict)
 
-
-# -------------------------
-# CHAT ENDPOINT
-# -------------------------
 @router.post("/text")
 def text_chat(request: TextChatRequest, http_request: Request):
 
+    # -------------------------
+    # INPUT VALIDATION
+    # -------------------------
     if not request.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
-    user_input = request.messages[-1].content.strip()
+    user_input = (request.messages[-1].content or "").strip()
 
     if not user_input:
         raise HTTPException(status_code=400, detail="Empty message")
 
-    # Fast deterministic response for wardrobe count questions to avoid model latency.
-    if _is_fast_wardrobe_count_query(user_input):
-        return _fast_wardrobe_count_response(
-            user_id=request.user_id or request.userID or "user_1",
-            query_text=user_input,
-        )
+    user_id = request.user_id or request.userID or "user_1"
 
     # -------------------------
-    # LANGUAGE DETECTION
+    # FAST PATH
+    # -------------------------
+    if _is_fast_wardrobe_count_query(user_input):
+        return _fast_wardrobe_count_response(user_id, user_input)
+
+    # -------------------------
+    # CACHE
+    # -------------------------
+    cache_key = _cache_key(user_input, user_id)
+    cached = _get_cached(_CHAT_CACHE, cache_key)
+    if cached:
+        return cached
+
+    # -------------------------
+    # LANGUAGE
     # -------------------------
     try:
-        preferred_lang = str(request.language or "en").lower()
-        has_telugu = bool(re.search(r"[\u0C00-\u0C7F]", user_input))
-        has_hindi = bool(re.search(r"[\u0900-\u097F]", user_input))
+        preferred_lang = (request.language or "en").lower()
 
-        if preferred_lang == "te" or has_telugu:
-            english_input = GoogleTranslator(source="te", target="en").translate(user_input)
-            target_lang = "te"
-        elif preferred_lang == "hi" or has_hindi:
-            english_input = GoogleTranslator(source="hi", target="en").translate(user_input)
-            target_lang = "hi"
+        if preferred_lang in ("te", "hi"):
+            english_input = GoogleTranslator(source=preferred_lang, target="en").translate(user_input)
+            target_lang = preferred_lang
         else:
             english_input = user_input
             target_lang = "en"
@@ -204,61 +237,77 @@ def text_chat(request: TextChatRequest, http_request: Request):
         target_lang = "en"
 
     # -------------------------
-    # 🔥 WEATHER INJECTION (NEW)
+    # HYBRID ROUTING
+    # -------------------------
+    mode = _detect_mode(english_input)
+
+    if mode == "greeting":
+        return {
+            "success": True,
+            "message": "Hey! I can help you style outfits or just chat 😊",
+            "cards": [],
+            "meta": {"mode": "greeting"},
+            "audio_job_id": "offline",
+        }
+
+    if mode == "casual" and not request.module_context:
+        try:
+            return {
+                "success": True,
+                "message": lightweight_chat(english_input),
+                "cards": [],
+                "meta": {"mode": "casual"},
+                "audio_job_id": "offline",
+            }
+        except Exception:
+            pass
+
+    # -------------------------
+    # WEATHER
     # -------------------------
     weather_data = {}
-
     try:
-        location = request.user_profile.get("location", {})
+        location = request.user_profile.get("location") or {}
+        lat, lon = location.get("lat"), location.get("lon")
 
-        if location.get("lat") and location.get("lon"):
-            weather_data = get_hourly_weather(
-                lat=location.get("lat"),
-                lon=location.get("lon")
-            )
+        if lat and lon:
+            weather_data = get_hourly_weather(lat=lat, lon=lon)
+
     except Exception as e:
-        logger.warning("weather lookup failed user_id=%s error=%s", request.user_id or request.userID or "user_1", e)
+        logger.warning("weather lookup failed %s", e)
 
     # -------------------------
-    # ORCHESTRATOR CALL
+    # ORCHESTRATOR (TIMEOUT SAFE)
     # -------------------------
     history = _build_history(request.messages[:-1]) if len(request.messages) > 1 else []
     memory_history = request.current_memory.get("history", []) if isinstance(request.current_memory, dict) else []
     merged_history = [h for h in memory_history if isinstance(h, dict)] + history
 
-    slot_hints: Dict[str, Any] = {}
-    if request.module_context:
-        module = str(request.module_context).lower()
-        if "occasion" in module:
-            slot_hints["occasion"] = request.user_profile.get("occasion")
-        if "work" in module or "office" in module:
-            slot_hints["occasion"] = slot_hints.get("occasion") or "office"
-
-    try:
-        result = ahvi_orchestrator.run(
+    def run():
+        return ahvi_orchestrator.run(
             text=english_input,
-            user_id=request.user_id or request.userID or "user_1",
+            user_id=user_id,
             context={
                 "memory": request.current_memory,
                 "user_profile": request.user_profile,
                 "module_context": request.module_context,
                 "history": merged_history[-20:],
-                "slots": slot_hints,
-                "request_id": str(getattr(http_request.state, "request_id", "") or ""),
-
-                # 🔥 NEW CONTEXT
                 "weather": weather_data.get("condition"),
                 "time_of_day": weather_data.get("time_of_day"),
             },
         )
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            result = ex.submit(run).result(timeout=8)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Orchestrator failed: {exc}")
 
-    # -------------------------
-    # TRANSLATE RESPONSE BACK
-    # -------------------------
-    message = result.get("message", "")
+    message = result.get("message") or ""
 
+    # -------------------------
+    # TRANSLATE BACK
+    # -------------------------
     try:
         if target_lang != "en" and message:
             message = GoogleTranslator(source="en", target=target_lang).translate(message)
@@ -266,204 +315,50 @@ def text_chat(request: TextChatRequest, http_request: Request):
         pass
 
     # -------------------------
-    # AUDIO (OPTIONAL)
+    # AUDIO
     # -------------------------
     try:
-        if (
-            run_heavy_audio_task is not None
-            and os.getenv("ENABLE_AUDIO_TASKS", "false").lower() in ("1", "true", "yes")
-        ):
-            request_id = str(getattr(http_request.state, "request_id", "") or "")
-            audio_job_id = enqueue_task(
-                task_func=run_heavy_audio_task,
-                args=[message, target_lang],
-                kwargs={"request_id": request_id},
-                kind="audio_generate",
-                user_id=request.user_id or request.userID or "user_1",
-                request_id=request_id,
-                source="api:/api/text",
-                meta={"task_type": "generate_audio"},
-            )
-        else:
-            audio_job_id = "offline"
+        audio_job_id = (
+            enqueue_task(run_heavy_audio_task, args=[message, target_lang])
+            if run_heavy_audio_task else "offline"
+        )
     except Exception:
         audio_job_id = "offline"
 
     # -------------------------
     # FINAL RESPONSE
     # -------------------------
-    cards_payload = result.get("cards", [])
-    cards_count = len(cards_payload) if isinstance(cards_payload, list) else 0
-    board_ids_text = str(result.get("board_ids", "") or "")
-    board_ids_count = len([x for x in board_ids_text.split(",") if str(x).strip()])
+    cards_payload = result.get("cards") or []
+    if not isinstance(cards_payload, list):
+        cards_payload = []
+
+    board_ids_text = str(result.get("board_ids") or "")
+
     logger.info(
-        "chat.text_response user_id=%s cards_count=%s board_ids_count=%s board_ids=%s",
-        request.user_id or request.userID or "user_1",
-        cards_count,
-        board_ids_count,
-        board_ids_text or "-",
+        "chat.text_response user_id=%s cards=%d",
+        user_id,
+        len(cards_payload),
     )
-    return {
+
+    response = {
         "success": True,
         "message": message,
         "board": result.get("board"),
         "type": result.get("type"),
         "cards": cards_payload,
         "board_ids": board_ids_text,
-        "data": result.get("data", {}),
+        "data": result.get("data") or {},
         "meta": {
-            **result.get("meta", {}),
+            **(result.get("meta") or {}),
             "weather": weather_data,
             "history_used": len(merged_history[-20:])
         },
         "audio_job_id": audio_job_id,
     }
 
+    # -------------------------
+    # CACHE SAVE
+    # -------------------------
+    _set_cache(_CHAT_CACHE, cache_key, response)
 
-# -------------------------
-# FEEDBACK
-# -------------------------
-@router.post("/feedback/outfit")
-def outfit_feedback(request: OutfitFeedbackRequest):
-
-    fb = str(request.feedback).strip().lower()
-
-    mapped = "up" if fb in ("up", "like", "liked", "thumbs_up", "👍") else "down"
-
-    if fb not in (
-        "up", "down", "like", "liked", "dislike", "disliked",
-        "thumbs_up", "thumbs_down", "👍", "👎"
-    ):
-        raise HTTPException(status_code=400, detail="feedback must be up/down")
-
-    try:
-        return save_feedback(
-            user_id=request.user_id,
-            outfit=request.outfit,
-            feedback=mapped
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to save feedback: {exc}")
-
-
-@router.post("/organize/chips")
-def organize_chips(request: OrganizeHubRequest, http_request: Request):
-    try:
-        result = ahvi_orchestrator.run(
-            text="open organize",
-            user_id=request.user_id,
-            context={
-                "memory": request.current_memory,
-                "user_profile": request.user_profile,
-                "module_context": "organize",
-                "history": [],
-                "include_counts": request.include_counts,
-                "request_id": str(getattr(http_request.state, "request_id", "") or ""),
-            },
-        )
-        return {
-            "success": True,
-            "message": result.get("message", "Choose what you want to organize."),
-            "board": result.get("board", "organize"),
-            "type": result.get("type", "chips"),
-            "chips": result.get("cards", []),
-            "data": result.get("data", {}),
-            "meta": result.get("meta", {}),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to load organize chips: {exc}")
-
-
-@router.post("/plan-pack")
-def plan_pack(request: PlanPackRequest, http_request: Request):
-    try:
-        weather_data = {}
-        try:
-            location = request.user_profile.get("location", {})
-            if location.get("lat") and location.get("lon"):
-                weather_data = get_hourly_weather(
-                    lat=location.get("lat"),
-                    lon=location.get("lon")
-                )
-        except Exception:
-            weather_data = {}
-
-        result = ahvi_orchestrator.run(
-            text=request.prompt,
-            user_id=request.user_id,
-            context={
-                "memory": request.current_memory,
-                "user_profile": request.user_profile,
-                "module_context": "plan_pack",
-                "history": [],
-                "request_id": str(getattr(http_request.state, "request_id", "") or ""),
-                "weather": weather_data.get("condition"),
-                "time_of_day": weather_data.get("time_of_day"),
-                "weather_data": weather_data,
-            },
-        )
-        return {
-            "success": True,
-            "message": result.get("message", ""),
-            "board": result.get("board", "plan_pack"),
-            "type": result.get("type", "checklists"),
-            "cards": result.get("cards", []),
-            "data": result.get("data", {}),
-            "meta": {
-                **result.get("meta", {}),
-                "weather": weather_data,
-            },
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to build plan & pack flow: {exc}")
-
-
-@router.post("/daily/cards")
-@router.post("/text/daily/cards")
-def daily_cards(request: DailyCardsRequest, http_request: Request):
-    try:
-        weather_data = {}
-        try:
-            location = request.user_profile.get("location", {})
-            if location.get("lat") and location.get("lon"):
-                weather_data = get_hourly_weather(
-                    lat=location.get("lat"),
-                    lon=location.get("lon"),
-                )
-        except Exception:
-            weather_data = {}
-
-        slot_hint = (request.time_slot or "").strip().lower() if request.time_slot else ""
-        prompt = f"{slot_hint} daily cards".strip() if slot_hint else "daily cards"
-
-        result = ahvi_orchestrator.run(
-            text=prompt,
-            user_id=request.user_id,
-            context={
-                "memory": request.current_memory,
-                "user_profile": request.user_profile,
-                "module_context": "daily_dependency",
-                "history": [],
-                "request_id": str(getattr(http_request.state, "request_id", "") or ""),
-                "time_slot": slot_hint or None,
-                "weather": weather_data.get("condition"),
-                "time_of_day": weather_data.get("time_of_day"),
-                "weather_data": weather_data,
-            },
-        )
-
-        return {
-            "success": True,
-            "message": result.get("message", ""),
-            "board": result.get("board", "daily_dependency"),
-            "type": result.get("type", "cards"),
-            "cards": result.get("cards", [])[:3],
-            "data": result.get("data", {}),
-            "meta": {
-                **result.get("meta", {}),
-                "weather": weather_data,
-            },
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to build daily cards: {exc}")
-
+    return response    

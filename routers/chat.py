@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any
-from services.light_chat import lightweight_chat
 import re
 import os
 import logging

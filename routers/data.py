@@ -1187,7 +1187,7 @@ def get_document(resource: str, document_id: str):
                 "gender": "",
                 "skinTone": 3,
                 "bodyShape": "",
-                "styles": [],
+                "stylePreferences": [],
                 "shopPrefs": [],
                 "isDark": True,
                 "theme": "coolBlue",

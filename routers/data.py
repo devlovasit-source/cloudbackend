@@ -1188,10 +1188,6 @@ def get_document(resource: str, document_id: str):
                 "skinTone": 3,
                 "bodyShape": "",
                 "stylePreferences": [],
-                "shopPrefs": [],
-                "isDark": True,
-                "theme": "coolBlue",
-                "lang": "en",
             }
             try:
                 created = _create_document_with_schema_retries(

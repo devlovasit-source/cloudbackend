@@ -32,6 +32,13 @@ logger = logging.getLogger("ahvi.routers.chat")
 _CHAT_CACHE = {}
 _WEATHER_CACHE = {}
 
+
+def lightweight_chat(text: str) -> str:
+    prompt = str(text or "").strip()
+    if not prompt:
+        return "Hey, what is on your mind today?"
+    return "I can help with style, planning, and wardrobe advice. Tell me what you want to solve."
+
 def _cache_key(text, user_id):
     return f"{user_id}:{text.lower().strip()}"
 
@@ -54,8 +61,29 @@ def _build_history(messages: List["Message"]) -> List[Dict[str, Any]]:
         content = str(getattr(msg, "content", "")).strip()
         if not content:
             continue
-        history.append({"role": role, "text": content})
+        history.append({"role": role, "text": content[:500]})
     return history
+
+
+def _normalize_memory_history(events: Any, max_items: int = 12) -> List[Dict[str, Any]]:
+    if not isinstance(events, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for event in events[-max_items:]:
+        if not isinstance(event, dict):
+            continue
+        row: Dict[str, Any] = {}
+        if event.get("intent"):
+            row["intent"] = str(event.get("intent"))[:80]
+        if isinstance(event.get("slots"), dict):
+            row["slots"] = event.get("slots")
+        if event.get("role"):
+            row["role"] = str(event.get("role"))[:32]
+        if event.get("text"):
+            row["text"] = str(event.get("text"))[:500]
+        if row:
+            normalized.append(row)
+    return normalized
 
 
 def _is_fast_wardrobe_count_query(text: str) -> bool:
@@ -280,7 +308,7 @@ def text_chat(request: TextChatRequest, http_request: Request):
     # -------------------------
     history = _build_history(request.messages[:-1]) if len(request.messages) > 1 else []
     memory_history = request.current_memory.get("history", []) if isinstance(request.current_memory, dict) else []
-    merged_history = [h for h in memory_history if isinstance(h, dict)] + history
+    merged_history = _normalize_memory_history(memory_history) + history
 
     def run():
         return ahvi_orchestrator.run(

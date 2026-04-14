@@ -114,6 +114,7 @@ def generate_text(
             signals=signals,
             model=model or p.model,
             timeout_seconds=timeout_seconds or p.timeout_seconds,
+            usecase=case,
         )
         _breaker_mark_success(op_key)
         _trace(
@@ -163,6 +164,7 @@ def chat_completion(
             user_profile=user_profile,
             signals=signals,
             timeout_seconds=timeout_seconds or p.timeout_seconds,
+            usecase=case,
         )
         _breaker_mark_success(op_key)
         _trace(
@@ -284,7 +286,8 @@ def _vision_model_candidates() -> List[str]:
 
 
 def _ollama_generate_url() -> str:
-    base = str(os.getenv("OLLAMA_URL", "http://localhost:11434/api") or "").strip().rstrip("/")
+    # Vision can run on a dedicated Ollama instance/port.
+    base = str(os.getenv("OLLAMA_VISION_URL", os.getenv("OLLAMA_URL", "http://localhost:11434/api")) or "").strip().rstrip("/")
     return f"{base}/generate" if base.endswith("/api") else f"{base}/api/generate"
 
 

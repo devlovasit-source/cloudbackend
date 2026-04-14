@@ -44,6 +44,11 @@ def _vision_enable_similarity() -> bool:
     return _env_bool("VISION_ANALYZE_ENABLE_SIMILARITY", False)
 
 
+def _enable_local_rembg_fallback() -> bool:
+    # Keep false by default so chat pods do not run heavy local segmentation.
+    return _env_bool("ENABLE_LOCAL_REMBG_FALLBACK", False)
+
+
 def _duplicate_threshold() -> float:
     try:
         val = float(os.getenv("WARDROBE_DUPLICATE_THRESHOLD", "0.97"))
@@ -163,14 +168,14 @@ def _remove_bg_first(image_base64: str):
             print(f"[BG] local failed: {exc}")
 
     # 5. RunPod (GPU)
-    RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg"
+    RUNPOD_URL = os.getenv("RUNPOD_BG_SINGLE_URL", "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg")
 
     for attempt in range(2):
         try:
             response = requests.post(
                 RUNPOD_URL,
                 json={"image_base64": base64_clean},
-                timeout=10
+                timeout=int(os.getenv("RUNPOD_BG_TIMEOUT_SECONDS", "10"))
             )
 
             if response.ok:
@@ -185,21 +190,22 @@ def _remove_bg_first(image_base64: str):
         except Exception as e:
             print(f"[BG] error attempt {attempt+1}: {e}")
 
-    # 6. rembg fallback
-    try:
-        from rembg import remove
+    # 6. Optional local rembg fallback (disabled by default for chat pods).
+    if _enable_local_rembg_fallback():
+        try:
+            from rembg import remove
 
-        img_bytes = base64.b64decode(base64_clean)
-        output = remove(img_bytes)
+            img_bytes = base64.b64decode(base64_clean)
+            output = remove(img_bytes)
 
-        encoded = base64.b64encode(output).decode()
-        processed = f"data:image/png;base64,{encoded}"
+            encoded = base64.b64encode(output).decode()
+            processed = f"data:image/png;base64,{encoded}"
 
-        _BG_CACHE[cache_key] = processed
-        return processed, True, "rembg_fallback"
+            _BG_CACHE[cache_key] = processed
+            return processed, True, "rembg_fallback"
 
-    except Exception as e:
-        print("[BG] rembg failed:", e)
+        except Exception as e:
+            print("[BG] rembg failed:", e)
 
     # 7. Final fallback
     return image_base64, False, "all_failed"

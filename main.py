@@ -52,6 +52,7 @@ data_router = _load_optional_router("routers.data")
 utilities_router = _load_optional_router("routers.utilities")
 boards_router = _load_optional_router("routers.boards")
 feedback_router = _load_optional_router("routers.feedback")
+ops_router = _load_optional_router("routers.ops")
 
 # AI
 ai_router = _load_optional_router("api.ai")
@@ -411,6 +412,9 @@ if ai_router:
 
 if feedback_router:
     app.include_router(feedback_router, tags=["Feedback"])
+
+if ops_router:
+    app.include_router(ops_router, prefix="/api/ops", tags=["Ops"])
 
 if stylist_router:
     app.include_router(stylist_router, prefix="/api/stylist")

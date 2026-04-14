@@ -1,4 +1,5 @@
 import base64
+import os
 import requests
 import time
 import uuid
@@ -15,7 +16,7 @@ router = APIRouter()
 # =========================
 # CONFIG
 # =========================
-RUNPOD_URL = "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg/batch"
+RUNPOD_URL = os.getenv("RUNPOD_BG_BATCH_URL", "https://wvntzm71uikrla-11434.proxy.runpod.net/remove-bg/batch")
 MAX_RETRIES = 3
 TIMEOUT = 20
 BATCH_SIZE = 4
@@ -253,6 +254,31 @@ def get_job(job_id):
     }
 
 
+def get_bg_runtime_metrics() -> dict:
+    processing = 0
+    completed = 0
+    errored = 0
+    for row in jobs.values():
+        if not row.get("done"):
+            processing += 1
+        elif row.get("error"):
+            errored += 1
+        else:
+            completed += 1
+
+    return {
+        "queue_size": int(task_queue.qsize()),
+        "jobs_total": int(len(jobs)),
+        "jobs_processing": int(processing),
+        "jobs_completed": int(completed),
+        "jobs_errored": int(errored),
+        "cache_size": int(len(_BG_CACHE)),
+        "batch_size": int(BATCH_SIZE),
+        "timeout_seconds": int(TIMEOUT),
+        "max_retries": int(MAX_RETRIES),
+    }
+
+
 # =========================
 # ROUTES
 # =========================
@@ -265,3 +291,32 @@ def remove_bg(request: BGRemoveRequest):
 @router.get("/remove-bg/status/{job_id}")
 def check_status(job_id: str):
     return get_job(job_id)
+
+
+def remove_background_sync(image_base64: str):
+    """
+    Synchronous compatibility helper used by legacy routes.
+    Returns the same shape expected by main.py and vision.py.
+    """
+    try:
+        result_list = call_runpod_batch([_resize_if_needed(image_base64)])
+        result = result_list[0] if isinstance(result_list, list) and result_list else ""
+        if not isinstance(result, str) or not result.strip():
+            return {"success": False, "bg_removed": False, "fallback_reason": "empty_runpod_response"}
+        if result.startswith("data:image"):
+            normalized = result
+        else:
+            normalized = f"data:image/png;base64,{result}"
+        return {
+            "success": True,
+            "bg_removed": True,
+            "image_base64": normalized,
+            "fallback_reason": None,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "bg_removed": False,
+            "image_base64": image_base64,
+            "fallback_reason": f"runpod_failed: {exc}",
+        }

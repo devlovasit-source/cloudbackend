@@ -1181,9 +1181,7 @@ def get_document(resource: str, document_id: str):
             default_doc = {
                 "name": "",
                 "username": "",
-                "email": "",
                 "phone": "",
-                "dob": "",
                 "gender": "",
                 "skinTone": 3,
                 "bodyShape": "",

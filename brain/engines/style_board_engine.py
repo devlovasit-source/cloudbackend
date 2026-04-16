@@ -2,38 +2,47 @@ import random
 from typing import Any, Dict, List
 
 from brain.engines.palette_engine import palette_engine
+from brain.engines.color_normalizer import color_normalizer
 
 
 class StyleBoardEngine:
     """
-    🔥 ELITE STYLE BOARD ENGINE (EDITORIAL)
+    🔥 ELITE V2 — EDITORIAL + PERSONALIZED
 
-    - Visual hierarchy (hero dominance)
-    - Depth layering (foreground / mid / background)
-    - Fashion-aware placement
-    - Aesthetic intelligence (not basic rules)
-    - Editorial composition types
+    - Multi-aesthetic aware
+    - Visual importance scoring
+    - Smart hero selection
+    - Contrast-aware layouts
+    - Personalized boards
     """
 
-    # =========================
-    # MAIN ENTRY
-    # =========================
     def build_board(self, outfit: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
 
         items = outfit.get("items", [])
         if not items:
             return {}
 
+        style_dna = context.get("style_dna", {}) or {}
+
+        # 🔥 MULTI-AESTHETIC SUPPORT
+        primary = style_dna.get("primary_aesthetic")
+        secondary = style_dna.get("secondary_aesthetics", [])
+
+        dominant = primary or (secondary[0] if secondary else None)
+
         palette = palette_engine.select_palette({
             "event": context.get("occasion"),
-            "microtheme": context.get("style_dna", {}).get("aesthetic")
+            "microtheme": dominant
         })
 
-        aesthetic = self._derive_aesthetic(items, context, palette)
+        aesthetic = self._derive_aesthetic(items, style_dna, palette)
         vibe = self._derive_vibe(context, aesthetic)
         color_story = self._build_color_story(items, palette)
 
-        layout = self._build_editorial_layout(items, aesthetic)
+        # 🔥 NEW: importance scoring
+        importance = self._compute_visual_importance(items)
+
+        layout = self._build_editorial_layout(items, importance, aesthetic)
 
         return {
             "aesthetic": aesthetic,
@@ -45,16 +54,13 @@ class StyleBoardEngine:
         }
 
     # =========================
-    # 🎨 AESTHETIC INTELLIGENCE
+    # 🎨 AESTHETIC
     # =========================
-    def _derive_aesthetic(self, items, context, palette):
+    def _derive_aesthetic(self, items, dna, palette):
 
-        colors = [str(i.get("color", "")).lower() for i in items if i.get("color")]
-        fits = [str(i.get("fit", "")).lower() for i in items if i.get("fit")]
+        colors = [color_normalizer.normalize(i.get("color")) for i in items if i.get("color")]
+        fits = [str(i.get("fit", "")).lower() for i in items]
 
-        palette_tags = palette.get("tags", [])
-
-        # 🔥 color logic
         if len(set(colors)) == 1:
             return "monochrome luxury"
 
@@ -64,18 +70,13 @@ class StyleBoardEngine:
         if len(set(colors)) >= 3:
             return "editorial contrast"
 
-        # 🔥 silhouette logic
         if any("oversized" in f for f in fits):
             return "relaxed luxury"
 
         if any("tailored" in f for f in fits):
             return "structured refinement"
 
-        # 🔥 palette influence
-        if "luxury" in palette_tags:
-            return "quiet luxury"
-
-        return context.get("style_dna", {}).get("aesthetic", "modern refined")
+        return dna.get("primary_aesthetic", "modern refined")
 
     # =========================
     # 💫 VIBE
@@ -85,10 +86,9 @@ class StyleBoardEngine:
         occasion = (context.get("occasion") or "").lower()
 
         vibe_map = {
-            "airport": "effortless transit",
             "office": "quiet authority",
             "date": "soft allure",
-            "party": "elevated presence",
+            "party": "elevated presence"
         }
 
         if occasion in vibe_map:
@@ -104,101 +104,98 @@ class StyleBoardEngine:
     # =========================
     def _build_color_story(self, items, palette):
 
-        item_colors = [str(i.get("color", "")).lower() for i in items if i.get("color")]
-        palette_colors = [c.lower() for c in palette.get("hex", [])]
+        item_colors = [color_normalizer.normalize(i.get("color")) for i in items]
+        palette_colors = [color_normalizer.normalize(c) for c in palette.get("hex", [])]
 
-        combined = list(dict.fromkeys(item_colors + palette_colors))
-
-        return combined[:5]
+        return list(dict.fromkeys(item_colors + palette_colors))[:5]
 
     # =========================
-    # 🧠 EDITORIAL LAYOUT
+    # 🔥 IMPORTANCE SCORING
     # =========================
-    def _build_editorial_layout(self, items, aesthetic):
+    def _compute_visual_importance(self, items):
 
-        hero = self._pick_hero(items)
+        scores = {}
 
-        supporting = [i for i in items if i != hero]
+        for item in items:
+            score = 0
+            t = str(item.get("type", "")).lower()
+            color = color_normalizer.normalize(item.get("color"))
+
+            # type priority
+            if any(k in t for k in ["outerwear", "dress", "blazer"]):
+                score += 2.0
+            elif "top" in t:
+                score += 1.5
+
+            # contrast colors
+            if color in ["red", "black", "white"]:
+                score += 1.0
+
+            # unique style boost
+            if item.get("style"):
+                score += 0.5
+
+            scores[item.get("id")] = score
+
+        return scores
+
+    # =========================
+    # 🧠 LAYOUT
+    # =========================
+    def _build_editorial_layout(self, items, importance, aesthetic):
+
+        sorted_items = sorted(items, key=lambda x: importance.get(x.get("id"), 0), reverse=True)
+
+        hero = sorted_items[0]
+        supporting = sorted_items[1:]
 
         return {
             "composition": self._composition_type(len(items), aesthetic),
             "layers": self._build_layers(hero, supporting),
-            "placements": self._build_placements(hero, supporting),
+            "placements": self._build_placements(hero, supporting)
         }
 
     # =========================
-    # 👑 HERO SELECTION
-    # =========================
-    def _pick_hero(self, items):
-
-        priority = ["outerwear", "dress", "blazer", "jacket", "top"]
-
-        for p in priority:
-            for i in items:
-                if p in str(i.get("type", "")).lower():
-                    return i
-
-        return items[0]
-
-    # =========================
-    # 🧱 LAYERING SYSTEM
+    # 🧱 LAYERS
     # =========================
     def _build_layers(self, hero, supporting):
 
-        layers = {
+        return {
             "foreground": [hero],
-            "midground": [],
-            "background": []
+            "midground": supporting[:2],
+            "background": supporting[2:]
         }
 
-        for item in supporting:
-            t = str(item.get("type", "")).lower()
-
-            if "shoes" in t or "footwear" in t:
-                layers["foreground"].append(item)
-
-            elif "accessory" in t or "bag" in t:
-                layers["midground"].append(item)
-
-            else:
-                layers["background"].append(item)
-
-        return layers
-
     # =========================
-    # 📐 INTELLIGENT PLACEMENT
+    # 📐 PLACEMENT
     # =========================
     def _build_placements(self, hero, supporting):
 
         placements = {}
 
-        # 🔥 hero dominance
         placements[hero.get("id")] = {
             "x": 0.5,
-            "y": 0.45,
-            "scale": 1.2,
+            "y": 0.4,
+            "scale": 1.25,
             "rotation": 0,
             "z": 3
         }
 
-        # 🔥 supporting flow
-        angles = [-25, -10, 10, 25]
-        positions = [(0.2, 0.7), (0.8, 0.7), (0.3, 0.2), (0.7, 0.2)]
+        positions = [(0.2, 0.75), (0.8, 0.75), (0.3, 0.2), (0.7, 0.2)]
 
         for i, item in enumerate(supporting):
-
             placements[item.get("id")] = {
                 "x": positions[i % len(positions)][0],
                 "y": positions[i % len(positions)][1],
-                "scale": round(random.uniform(0.6, 0.9), 2),
-                "rotation": angles[i % len(angles)],
+                "scale": round(random.uniform(0.6, 0.85), 2),
+                "rotation": random.choice([-15, -5, 5, 15]),
                 "z": 2 if i < 2 else 1
             }
 
         return placements
 
     # =========================
-    # 🧾 COMPOSITION TYPE
+    # 🧾 COMPOSITION
     # =========================
     def _composition_type(self, count, aesthetic):
 
@@ -206,12 +203,12 @@ class StyleBoardEngine:
             return "editorial_focus"
 
         if count <= 3:
-            return "minimal_grid"
+            return "minimal"
 
         if count <= 5:
-            return "balanced_editorial"
+            return "balanced"
 
-        return "magazine_spread"
+        return "spread"
 
 
 # Singleton

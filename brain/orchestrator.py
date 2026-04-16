@@ -8,11 +8,12 @@ from brain.engines.organize_engine import organize_engine
 from brain.engines.meal_planner_engine import meal_planner_engine
 from brain.engines.fitness_engine import fitness_engine
 
-from brain.engines.outfit_engine import get_daily_outfits  # your existing
+from brain.engines.outfit_engine import get_daily_outfits
 from brain.engines.style_rules_engine import style_engine
 
-from brain.response.assembler import assemble_response
-from brain.tone.tone_engine import apply_tone
+# ✅ FIX: correct imports
+from brain.response.assembler import response_assembler
+from brain.tone.tone_engine import tone_engine
 
 palette_engine = PaletteEngine()
 
@@ -25,9 +26,6 @@ class Orchestrator:
     Intent → Context → Engine → Decision → Assembly → Tone
     """
 
-    # =========================
-    # ENTRY POINT
-    # =========================
     def handle(self, user_input: str, user: Dict[str, Any]) -> Dict[str, Any]:
 
         # -------------------------
@@ -41,9 +39,11 @@ class Orchestrator:
         # 2. CONTEXT
         # -------------------------
         context = self._build_context(user, slots)
+        context["intent"] = intent
+        context["domains"] = [intent]
 
         # -------------------------
-        # 3. ROUTE TO ENGINE
+        # 3. ROUTING
         # -------------------------
         if intent == "styling":
             result = self._handle_styling(context)
@@ -61,22 +61,27 @@ class Orchestrator:
             result = self._fallback()
 
         # -------------------------
-        # 4. RESPONSE ASSEMBLY
+        # 4. ASSEMBLE RESPONSE
         # -------------------------
-        response = assemble_response(result, context)
+        response = response_assembler.assemble(result, context)
 
         # -------------------------
-        # 5. TONE + PERSONALITY
+        # 5. APPLY TONE (FINAL LAYER)
         # -------------------------
-        response["message"] = apply_tone(
+        response["message"] = tone_engine.apply(
             response.get("message", ""),
-            context=context
+            user_profile=context.get("user_profile"),
+            signals={
+                "context_mode": "styling" if intent == "styling" else "general",
+                "emotion_state": context.get("emotion", "neutral"),
+                "aesthetic": context.get("aesthetic"),  # 🔥 CRITICAL
+            },
         )
 
         return response
 
     # =========================
-    # CONTEXT BUILDER
+    # CONTEXT
     # =========================
     def _build_context(self, user: Dict[str, Any], slots: Dict[str, Any]) -> Dict[str, Any]:
 
@@ -85,13 +90,14 @@ class Orchestrator:
             "persona": user.get("persona", "default"),
             "style_dna": user.get("style_dna", {}),
             "wardrobe": user.get("wardrobe", []),
+            "user_profile": user.get("profile", {}),
             "slots": slots,
             "occasion": slots.get("occasion"),
             "weather": slots.get("weather"),
         }
 
     # =========================
-    # STYLING FLOW (CORE)
+    # 🔥 STYLING FLOW (FIXED)
     # =========================
     def _handle_styling(self, context: Dict[str, Any]) -> Dict[str, Any]:
 
@@ -110,7 +116,7 @@ class Orchestrator:
         })
 
         # -------------------------
-        # 2. GENERATE OUTFITS
+        # 2. OUTFIT GENERATION
         # -------------------------
         outfit_data = get_daily_outfits({
             "user_id": context["user_id"],
@@ -120,7 +126,7 @@ class Orchestrator:
         outfits = outfit_data.get("outfits", [])
 
         # -------------------------
-        # 3. APPLY STYLE RULES
+        # 3. STYLE RULES
         # -------------------------
         rules = style_engine.get_scoring_rules(
             context.get("style_dna"),
@@ -131,13 +137,12 @@ class Orchestrator:
         for outfit in outfits:
             score = outfit.get("score", 0)
 
-            # simple rule boost example
             for item in outfit.get("items", []):
                 if item.get("color") in rules["preferred_colors"]:
                     score += 1
 
             enriched.append({
-                **outfit,
+                **outfit,  # ✅ KEEP description + aesthetic intact
                 "final_score": score
             })
 
@@ -151,6 +156,12 @@ class Orchestrator:
         )
 
         # -------------------------
+        # 🔥 CRITICAL: inject aesthetic for tone
+        # -------------------------
+        if selected:
+            context["aesthetic"] = selected[0].get("aesthetic", {})
+
+        # -------------------------
         # 5. PALETTE
         # -------------------------
         palette = palette_engine.select_palette({
@@ -158,11 +169,17 @@ class Orchestrator:
             "microtheme": context.get("style_dna", {}).get("aesthetic")
         })
 
+        # -------------------------
+        # ✅ FINAL STRUCTURED OUTPUT
+        # -------------------------
         return {
             "type": "styling",
-            "outfits": selected,
-            "palette": palette,
-            "meta": meta
+            "data": {
+                "outfits": selected,
+                "palette": palette
+            },
+            "meta": meta,
+            "message": selected[0].get("description", "") if selected else ""
         }
 
     # =========================

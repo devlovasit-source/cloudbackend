@@ -5,10 +5,14 @@ from brain.engines.style_rules_engine import style_engine
 from brain.engines.palette_engine import palette_engine
 from brain.engines.color_normalizer import color_normalizer
 
+# 🔥 NEW
+from services.qdrant_service import qdrant_service
+from services.embedding_service import embedding_service
+
 
 class UnifiedStyleScorer:
     """
-    🔥 ELITE STYLE BRAIN (UPGRADED)
+    🔥 ELITE STYLE BRAIN (FINAL)
 
     Combines:
     - Graph compatibility
@@ -19,6 +23,8 @@ class UnifiedStyleScorer:
     - Tone harmony
     - Aesthetic balance
     - Diversity control
+    - 🧠 Conversation memory
+    - 🧲 Qdrant personalization
     """
 
     # =========================
@@ -36,7 +42,9 @@ class UnifiedStyleScorer:
 
         style_dna = context.get("style_dna", {}) or {}
 
+        # =========================
         # 🔥 MULTI-AESTHETIC SETUP
+        # =========================
         primary = style_dna.get("primary_aesthetic")
         secondary = style_dna.get("secondary_aesthetics", []) or []
 
@@ -47,16 +55,19 @@ class UnifiedStyleScorer:
         for i, a in enumerate(secondary):
             aesthetic_weights[a] = max(0.4, 0.7 - (i * 0.1))
 
-        # fallback
         if not aesthetic_weights:
             fallback = style_dna.get("aesthetic")
             if fallback:
                 aesthetic_weights[fallback] = 1.0
 
-        # 🔥 RULES
+        # =========================
+        # RULES
+        # =========================
         rules = style_engine.get_scoring_rules(style_dna, context)
 
-        # 🔥 PALETTE (use dominant aesthetic)
+        # =========================
+        # PALETTE
+        # =========================
         dominant = primary or (secondary[0] if secondary else None)
 
         palette = palette_engine.select_palette({
@@ -103,13 +114,11 @@ class UnifiedStyleScorer:
 
             tones.append(tone)
 
-            # palette match
             if color in palette_colors:
                 score += 0.8
             elif self._is_neutral(color):
                 score += 0.4
 
-            # skin tone compatibility
             if color in compatible_colors:
                 score += 0.5
 
@@ -142,7 +151,7 @@ class UnifiedStyleScorer:
             score += self._dna_score(item, style_dna)
 
         # =========================
-        # 6. MULTI-AESTHETIC MATCH 🔥
+        # 6. MULTI-AESTHETIC
         # =========================
         for item in items:
             score += self._aesthetic_match_score(item, aesthetic_weights)
@@ -153,9 +162,19 @@ class UnifiedStyleScorer:
         score += self._aesthetic_score(items)
 
         # =========================
-        # 8. DIVERSITY PENALTY
+        # 8. DIVERSITY
         # =========================
         score += self._diversity_penalty(items)
+
+        # =========================
+        # 🔥 9. PERSONALIZATION LAYER
+        # =========================
+        user_id = context.get("user_id")
+
+        score += self._memory_score(items, context)
+
+        vector = self._build_outfit_embedding(items)
+        score += self._qdrant_score(user_id, vector)
 
         return round(score, 3)
 
@@ -188,7 +207,7 @@ class UnifiedStyleScorer:
         return score
 
     # =========================
-    # MULTI-AESTHETIC MATCH
+    # AESTHETIC MATCH
     # =========================
     def _aesthetic_match_score(self, item: Dict[str, Any], weights: Dict[str, float]) -> float:
         score = 0.0
@@ -218,7 +237,82 @@ class UnifiedStyleScorer:
         return score
 
     # =========================
-    # TONE HARMONY
+    # MEMORY SCORE
+    # =========================
+    def _memory_score(self, items: List[Dict[str, Any]], context: Dict[str, Any]) -> float:
+
+        memory = context.get("memory", {}).get("memory_signals", {})
+
+        if not memory:
+            return 0.0
+
+        score = 0.0
+
+        liked_colors = memory.get("liked_colors", [])
+        disliked_items = memory.get("disliked_items", [])
+        preferred_styles = memory.get("preferred_styles", [])
+
+        for item in items:
+            color = color_normalizer.normalize(item.get("color"))
+            style = str(item.get("style", "")).lower()
+            item_type = str(item.get("type", "")).lower()
+
+            if color in liked_colors:
+                score += 0.4
+
+            if any(s in style for s in preferred_styles):
+                score += 0.5
+
+            if item_type in disliked_items:
+                score -= 1.2
+
+        return score
+
+    # =========================
+    # EMBEDDING
+    # =========================
+    def _build_outfit_embedding(self, items: List[Dict[str, Any]]) -> List[float]:
+
+        text = " ".join([
+            f"{i.get('type','')} {i.get('color','')} {i.get('style','')} {i.get('fabric','')}"
+            for i in items
+        ])
+
+        return embedding_service.encode_text(text)
+
+    # =========================
+    # QDRANT
+    # =========================
+    def _qdrant_score(self, user_id: str, vector: List[float]) -> float:
+
+        if not user_id or not vector:
+            return 0.0
+
+        try:
+            liked = qdrant_service.search_user_memory(
+                user_id=user_id,
+                vector=vector,
+                memory_type="liked",
+                limit=3
+            )
+
+            disliked = qdrant_service.search_user_memory(
+                user_id=user_id,
+                vector=vector,
+                memory_type="disliked",
+                limit=3
+            )
+
+            like_score = sum(r.get("score", 0) for r in liked)
+            dislike_score = sum(r.get("score", 0) for r in disliked)
+
+            return (like_score * 1.2) - (dislike_score * 1.5)
+
+        except Exception:
+            return 0.0
+
+    # =========================
+    # TONE
     # =========================
     def _tone_harmony_score(self, tones: List[str]) -> float:
         if not tones:

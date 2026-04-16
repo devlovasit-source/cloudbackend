@@ -8,14 +8,17 @@ from brain.engines.color_normalizer import color_normalizer
 
 class UnifiedStyleScorer:
     """
-    🔥 ELITE STYLE BRAIN
+    🔥 ELITE STYLE BRAIN (UPGRADED)
 
     Combines:
     - Graph compatibility
-    - Palette intelligence (hex → normalized)
-    - Style DNA (personalization)
-    - Tone harmony (warm/cool)
-    - Aesthetic balance (color + silhouette)
+    - Palette intelligence
+    - Multi-aesthetic blending
+    - Skin tone compatibility
+    - Style DNA personalization
+    - Tone harmony
+    - Aesthetic balance
+    - Diversity control
     """
 
     # =========================
@@ -33,14 +36,34 @@ class UnifiedStyleScorer:
 
         style_dna = context.get("style_dna", {}) or {}
 
+        # 🔥 MULTI-AESTHETIC SETUP
+        primary = style_dna.get("primary_aesthetic")
+        secondary = style_dna.get("secondary_aesthetics", []) or []
+
+        aesthetic_weights = {}
+        if primary:
+            aesthetic_weights[primary] = 1.0
+
+        for i, a in enumerate(secondary):
+            aesthetic_weights[a] = max(0.4, 0.7 - (i * 0.1))
+
+        # fallback
+        if not aesthetic_weights:
+            fallback = style_dna.get("aesthetic")
+            if fallback:
+                aesthetic_weights[fallback] = 1.0
+
+        # 🔥 RULES
         rules = style_engine.get_scoring_rules(style_dna, context)
+
+        # 🔥 PALETTE (use dominant aesthetic)
+        dominant = primary or (secondary[0] if secondary else None)
 
         palette = palette_engine.select_palette({
             "event": context.get("occasion"),
-            "microtheme": style_dna.get("aesthetic")
+            "microtheme": dominant
         })
 
-        # 🔥 normalize palette colors
         palette_colors = [
             color_normalizer.normalize(c)
             for c in palette.get("hex", [])
@@ -62,26 +85,36 @@ class UnifiedStyleScorer:
                 score += style_graph_engine.pair_weight(graph, a_id, b_id)
 
         # =========================
-        # 2. PALETTE + COLOR MATCH
+        # 2. COLOR + PALETTE + SKIN
         # =========================
         tones = []
 
+        skin = context.get("skin_tone_data", {})
+        compatible_colors = skin.get("compatible_colors", [])
+
         for item in items:
-            color = color_normalizer.normalize(item.get("color"))
-            tone = color_normalizer.detect_tone(item.get("color"))
+            raw_color = item.get("color")
+
+            color = color_normalizer.normalize(raw_color)
+            tone = color_normalizer.detect_tone(raw_color) if raw_color else "neutral"
 
             if not color:
                 continue
 
             tones.append(tone)
 
+            # palette match
             if color in palette_colors:
-                score += 0.8  # stronger now
+                score += 0.8
             elif self._is_neutral(color):
                 score += 0.4
 
+            # skin tone compatibility
+            if color in compatible_colors:
+                score += 0.5
+
         # =========================
-        # 3. TONE HARMONY (NEW 🔥)
+        # 3. TONE HARMONY
         # =========================
         score += self._tone_harmony_score(tones)
 
@@ -89,7 +122,7 @@ class UnifiedStyleScorer:
         # 4. STYLE RULES
         # =========================
         for item in items:
-            text = str(item).lower()
+            text = f"{item.get('type','')} {item.get('style','')} {item.get('fabric','')}".lower()
             color = color_normalizer.normalize(item.get("color"))
             item_type = str(item.get("type", "")).lower()
 
@@ -103,15 +136,26 @@ class UnifiedStyleScorer:
                 score -= 2.0
 
         # =========================
-        # 5. STYLE DNA (STRONGER)
+        # 5. STYLE DNA
         # =========================
         for item in items:
             score += self._dna_score(item, style_dna)
 
         # =========================
-        # 6. AESTHETIC BALANCE
+        # 6. MULTI-AESTHETIC MATCH 🔥
+        # =========================
+        for item in items:
+            score += self._aesthetic_match_score(item, aesthetic_weights)
+
+        # =========================
+        # 7. AESTHETIC BALANCE
         # =========================
         score += self._aesthetic_score(items)
+
+        # =========================
+        # 8. DIVERSITY PENALTY
+        # =========================
+        score += self._diversity_penalty(items)
 
         return round(score, 3)
 
@@ -144,6 +188,36 @@ class UnifiedStyleScorer:
         return score
 
     # =========================
+    # MULTI-AESTHETIC MATCH
+    # =========================
+    def _aesthetic_match_score(self, item: Dict[str, Any], weights: Dict[str, float]) -> float:
+        score = 0.0
+
+        item_style = str(item.get("style", "")).lower()
+        item_type = str(item.get("type", "")).lower()
+
+        for aesthetic, weight in weights.items():
+
+            if not aesthetic:
+                continue
+
+            a = aesthetic.lower()
+
+            if "minimal" in a and any(k in item_style for k in ["clean", "plain", "tailored"]):
+                score += 0.6 * weight
+
+            if "street" in a and any(k in item_style for k in ["graphic", "oversized", "casual"]):
+                score += 0.6 * weight
+
+            if "formal" in a and any(k in item_type for k in ["blazer", "trouser", "suit"]):
+                score += 0.6 * weight
+
+            if "boho" in a and any(k in item_style for k in ["printed", "layered", "ethnic"]):
+                score += 0.6 * weight
+
+        return score
+
+    # =========================
     # TONE HARMONY
     # =========================
     def _tone_harmony_score(self, tones: List[str]) -> float:
@@ -152,22 +226,19 @@ class UnifiedStyleScorer:
 
         unique = set(tones)
 
-        # all same → cohesive
         if len(unique) == 1:
             return 0.8
 
-        # mix of warm + neutral OR cool + neutral → stylish
         if "neutral" in unique:
             return 0.5
 
-        # clash (warm + cool)
         if "warm" in unique and "cool" in unique:
             return 0.2
 
         return 0.4
 
     # =========================
-    # AESTHETIC LOGIC
+    # AESTHETIC BALANCE
     # =========================
     def _aesthetic_score(self, items: List[Dict[str, Any]]) -> float:
         score = 0.0
@@ -182,21 +253,30 @@ class UnifiedStyleScorer:
             for i in items if i.get("fit")
         ]
 
-        # 🎨 COLOR STORY
         unique_colors = len(set(colors))
 
         if unique_colors == 1:
-            score += 1.0  # strong monochrome
+            score += 1.0
         elif unique_colors == 2:
             score += 0.7
         elif unique_colors >= 3:
             score += 0.5
 
-        # 🧍 SILHOUETTE BALANCE
         if self._has_balance(fits):
             score += 0.8
 
         return score
+
+    # =========================
+    # DIVERSITY
+    # =========================
+    def _diversity_penalty(self, items):
+        types = [str(i.get("type", "")).lower() for i in items]
+
+        if len(set(types)) < 2:
+            return -0.5
+
+        return 0.0
 
     # =========================
     # HELPERS

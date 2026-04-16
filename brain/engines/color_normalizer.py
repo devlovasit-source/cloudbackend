@@ -1,20 +1,40 @@
-from typing import Tuple
+from typing import Tuple, Dict
 import re
+import math
 
 
 class ColorNormalizer:
     """
-    🔥 COLOR NORMALIZATION ENGINE
+    🔥 PREMIUM COLOR INTELLIGENCE
 
-    Converts:
-    - hex → color name
-    - rgb → color name (optional future)
-    - keeps names unchanged
+    - hex → nearest color name (distance-based)
+    - tone detection (warm / cool / neutral)
+    - consistent mapping across system
 
     Used by:
     - style_scorer
-    - palette matching
+    - palette engine
+    - tone engine (future)
     """
+
+    def __init__(self):
+        # 🎯 anchor colors (expandable)
+        self.color_map: Dict[str, Tuple[int, int, int]] = {
+            "black": (0, 0, 0),
+            "white": (255, 255, 255),
+            "grey": (128, 128, 128),
+            "red": (220, 20, 60),
+            "blue": (30, 144, 255),
+            "green": (34, 139, 34),
+            "yellow": (255, 215, 0),
+            "orange": (255, 140, 0),
+            "purple": (138, 43, 226),
+            "pink": (255, 105, 180),
+            "beige": (245, 222, 179),
+            "brown": (139, 69, 19),
+            "navy": (0, 0, 128),
+            "cream": (255, 253, 208),
+        }
 
     # =========================
     # MAIN ENTRY
@@ -33,7 +53,7 @@ class ColorNormalizer:
         if not rgb:
             return color
 
-        return self._map_rgb_to_name(rgb)
+        return self._closest_color(rgb)
 
     # =========================
     # HEX → RGB
@@ -47,49 +67,59 @@ class ColorNormalizer:
         if len(hex_color) != 6 or not re.match(r"[0-9a-f]{6}", hex_color):
             return None
 
-        r = int(hex_color[0:2], 16)
-        g = int(hex_color[2:4], 16)
-        b = int(hex_color[4:6], 16)
-
-        return (r, g, b)
+        return (
+            int(hex_color[0:2], 16),
+            int(hex_color[2:4], 16),
+            int(hex_color[4:6], 16),
+        )
 
     # =========================
-    # RGB → COLOR NAME
+    # DISTANCE MATCH
     # =========================
-    def _map_rgb_to_name(self, rgb: Tuple[int, int, int]) -> str:
-        r, g, b = rgb
+    def _closest_color(self, rgb: Tuple[int, int, int]) -> str:
+        min_dist = float("inf")
+        closest = "unknown"
 
-        # 🔥 simple but effective buckets
+        for name, ref_rgb in self.color_map.items():
+            dist = self._distance(rgb, ref_rgb)
+            if dist < min_dist:
+                min_dist = dist
+                closest = name
 
-        if r < 50 and g < 50 and b < 50:
-            return "black"
+        return closest
 
-        if r > 200 and g > 200 and b > 200:
-            return "white"
+    def _distance(self, c1: Tuple[int, int, int], c2: Tuple[int, int, int]) -> float:
+        return math.sqrt(
+            (c1[0] - c2[0]) ** 2 +
+            (c1[1] - c2[1]) ** 2 +
+            (c1[2] - c2[2]) ** 2
+        )
 
-        if abs(r - g) < 20 and abs(g - b) < 20:
-            return "grey"
+    # =========================
+    # TONE DETECTION
+    # =========================
+    def detect_tone(self, color: str) -> str:
+        """
+        Returns:
+        - warm
+        - cool
+        - neutral
+        """
 
-        # dominant channels
-        if r > g and r > b:
-            if g > 100:
-                return "orange"
-            return "red"
+        color = self.normalize(color)
 
-        if g > r and g > b:
-            return "green"
+        warm = {"red", "orange", "yellow", "brown"}
+        cool = {"blue", "green", "purple", "navy"}
+        neutral = {"black", "white", "grey", "beige", "cream"}
 
-        if b > r and b > g:
-            return "blue"
+        if color in warm:
+            return "warm"
+        if color in cool:
+            return "cool"
+        if color in neutral:
+            return "neutral"
 
-        # mixed tones
-        if r > 150 and g > 120 and b < 100:
-            return "beige"
-
-        if r > 120 and g < 80 and b > 120:
-            return "purple"
-
-        return "unknown"
+        return "neutral"
 
 
 # Singleton

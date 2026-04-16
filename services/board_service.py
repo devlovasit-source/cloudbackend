@@ -9,6 +9,9 @@ from services.appwrite_proxy import AppwriteProxy, AppwriteProxyError
 from services.r2_storage import R2Storage, R2StorageError
 
 
+# =========================
+# HELPERS
+# =========================
 def clean_occasion(raw: str) -> str:
     v = (raw or "").strip().lower()
     mapping = {
@@ -28,6 +31,8 @@ def decode_image_base64(value: str) -> tuple[bytes, str]:
         return b"", "png"
 
     extension = "png"
+
+    # detect data URI
     if text.startswith("data:image/"):
         match = re.match(r"^data:image/([a-zA-Z0-9]+);base64,", text)
         if match:
@@ -41,11 +46,16 @@ def decode_image_base64(value: str) -> tuple[bytes, str]:
 
     if not data:
         raise HTTPException(status_code=400, detail="image_base64 is empty")
+
     if len(data) > 12 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="image_base64 too large (max 12MB)")
+
     return data, extension
 
 
+# =========================
+# READ APIs
+# =========================
 def list_saved_boards(*, user_id: str, occasion: Optional[str] = None, limit: int = 100):
     proxy = AppwriteProxy()
     return proxy.list_documents(
@@ -56,6 +66,13 @@ def list_saved_boards(*, user_id: str, occasion: Optional[str] = None, limit: in
     )
 
 
+def list_life_boards(*, user_id: str, limit: int = 100):
+    return AppwriteProxy().list_documents("life_boards", user_id=user_id, limit=limit)
+
+
+# =========================
+# SAVE STYLE BOARD
+# =========================
 def save_board(
     *,
     user_id: str,
@@ -66,40 +83,81 @@ def save_board(
     payload: Optional[Dict[str, Any]] = None,
 ):
     proxy = AppwriteProxy()
+    payload = payload or {}
+
     final_image_url = (image_url or "").strip()
+
+    # 🔥 Upload if base64 present
     if str(image_base64 or "").strip():
         image_bytes, extension = decode_image_base64(image_base64)
-        storage = R2Storage()
-        uploaded = storage.upload_style_board_image(
-            user_id=user_id,
-            image_bytes=image_bytes,
-            extension=extension,
-        )
-        final_image_url = uploaded.get("image_url", final_image_url)
 
+        try:
+            storage = R2Storage()
+            uploaded = storage.upload_style_board_image(
+                user_id=user_id,
+                image_bytes=image_bytes,
+                extension=extension,
+            )
+            final_image_url = uploaded.get("image_url", final_image_url)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Image upload failed: {exc}")
+
+    # =========================
+    # ITEM IDS EXTRACTION
+    # =========================
     item_ids: list[str] = []
+
     if board_ids:
         item_ids = [x.strip() for x in board_ids.split(",") if x.strip()]
-    elif isinstance(payload, dict):
+    else:
         raw_item_ids = payload.get("itemIds") or payload.get("boardIds") or []
         if isinstance(raw_item_ids, list):
             item_ids = [str(x).strip() for x in raw_item_ids if str(x).strip()]
 
+    # =========================
+    # 🔥 ELITE STRUCTURED BOARD
+    # =========================
     doc = {
         "userId": user_id,
         "occasion": clean_occasion(occasion),
         "imageUrl": final_image_url,
         "itemIds": item_ids,
+
+        # 🔥 NEW INTELLIGENCE LAYER
+        "aesthetic": payload.get("aesthetic"),
+        "vibe": payload.get("vibe"),
+        "colorStory": payload.get("color_story", []),
+
+        # layout for pinterest-style rendering
+        "layout": payload.get("layout", {}),
+
+        # full item metadata (optional but powerful)
+        "items": payload.get("items", []),
+
+        # scoring (optional)
+        "styleScore": payload.get("score"),
+
+        # timestamps
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
+
     return proxy.create_document("saved_boards", doc)
 
 
-def list_life_boards(*, user_id: str, limit: int = 100):
-    return AppwriteProxy().list_documents("life_boards", user_id=user_id, limit=limit)
-
-
-def save_life_board(*, user_id: str, title: str, board_type: str, description: str, payload: Dict[str, Any]):
+# =========================
+# SAVE LIFE BOARD
+# =========================
+def save_life_board(
+    *,
+    user_id: str,
+    title: str,
+    board_type: str,
+    description: str,
+    payload: Dict[str, Any],
+):
     now_iso = datetime.now(timezone.utc).isoformat()
+
     doc = {
         "userId": user_id,
         "title": (title or "").strip() or "Life Board",
@@ -109,9 +167,13 @@ def save_life_board(*, user_id: str, title: str, board_type: str, description: s
         "createdAt": now_iso,
         "updatedAt": now_iso,
     }
+
     return AppwriteProxy().create_document("life_boards", doc)
 
 
+# =========================
+# DELETE
+# =========================
 def delete_saved_board(*, document_id: str):
     AppwriteProxy().delete_document("saved_boards", document_id)
 

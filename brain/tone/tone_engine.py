@@ -1,9 +1,5 @@
 import os
 import json
-import random
-from typing import Dict, Any, List
-
-from brain.tone.archetype_engine import archetype_engine
 
 
 class ToneEngine:
@@ -20,16 +16,9 @@ class ToneEngine:
             self.config = {}
 
     # =========================
-    # MAIN ENTRY (FINAL)
+    # MAIN ENTRY
     # =========================
-    def apply(
-        self,
-        text: str,
-        user_profile: dict = None,
-        signals: dict = None,
-        context: dict = None,
-        user_memory: dict = None
-    ) -> str:
+    def apply(self, text: str, user_profile: dict = None, signals: dict = None, context: dict = None):
 
         if not text:
             return text
@@ -37,148 +26,186 @@ class ToneEngine:
         user_profile = user_profile or {}
         signals = signals or {}
         context = context or {}
-        user_memory = user_memory or {}
+
+        user_memory = user_profile.get("memory", {})
 
         # -------------------------
-        # 🔥 BUILD BASE TONE
+        # 1. BASE DETECTION
         # -------------------------
-        tone = self._build_tone_profile(user_profile, signals)
-
-        # -------------------------
-        # 🔥 GET ARCHETYPE BLEND
-        # -------------------------
-        archetypes = archetype_engine.select(context, user_memory)
-
-        # -------------------------
-        # 🔥 APPLY CONSTRAINTS FIRST
-        # -------------------------
-        text = self._apply_constraints(text, tone)
-
-        # -------------------------
-        # 🔥 APPLY ARCHETYPE BLEND
-        # -------------------------
-        text = self._apply_archetype_blend(text, archetypes)
-
-        # -------------------------
-        # 🔥 FINAL PERSONALITY TOUCH
-        # -------------------------
-        text = self._apply_personality(text, tone, user_memory)
-
-        return text.strip()
-
-    # =========================
-    # TONE PROFILE
-    # =========================
-    def _build_tone_profile(self, user_profile, signals):
-
         generation = self._detect_generation(user_profile)
         context_mode = signals.get("context_mode", "general")
         emotion = signals.get("emotion_state", "neutral")
 
-        gen_rules = self.config.get("generation_defaults", {}).get(generation, {})
-        ctx_rules = self.config.get("context_modes", {}).get(context_mode, {})
-        emo_rules = self.config.get("emotion_overrides", {}).get(emotion, {})
+        context_rules = self.config.get("context_modes", {}).get(context_mode, {})
+        emotion_rules = self.config.get("emotion_overrides", {}).get(emotion, {})
 
-        tone = {
-            "slang": gen_rules.get("base_slang", 10),
-            "emoji": gen_rules.get("base_emoji", 0),
-            "sass": gen_rules.get("base_sass", 10),
-        }
+        # -------------------------
+        # 2. OUTFIT AESTHETIC
+        # -------------------------
+        aesthetic = context.get("aesthetic") or self._extract_outfit_aesthetic(context)
 
-        # context caps
-        tone["slang"] = min(tone["slang"], ctx_rules.get("slang_cap", tone["slang"]))
-        tone["emoji"] = min(tone["emoji"], ctx_rules.get("emoji_cap", tone["emoji"]))
+        # -------------------------
+        # 3. LEARNED USER TONE
+        # -------------------------
+        learned_tone = user_memory.get("tone_preferences", {})
 
-        # emotion overrides (highest priority)
-        if emo_rules:
-            tone["slang"] = emo_rules.get("slang_cap", tone["slang"])
-            tone["emoji"] = emo_rules.get("emoji_cap", tone["emoji"])
-            tone["sass"] = emo_rules.get("sass_cap", tone["sass"])
+        # -------------------------
+        # 4. APPLY BASE CONSTRAINTS
+        # -------------------------
+        text = self._apply_constraints(text, context_rules, emotion_rules)
 
-        return tone
+        # -------------------------
+        # 5. APPLY OUTFIT TONE
+        # -------------------------
+        text = self._apply_outfit_tone(text, aesthetic)
 
-    # =========================
-    # ARCHETYPE BLENDING
-    # =========================
-    def _apply_archetype_blend(self, text: str, archetypes: List[Dict]) -> str:
+        # -------------------------
+        # 6. APPLY LEARNED USER STYLE
+        # -------------------------
+        text = self._apply_user_preference(text, learned_tone)
 
-        if not archetypes:
-            return text
+        # -------------------------
+        # 7. UPDATE MEMORY (FEEDBACK LOOP)
+        # -------------------------
+        updated_memory = self._update_learning(user_memory, signals, aesthetic)
 
-        final_text = text
-
-        for arc in archetypes:
-            arc_type = arc.get("type")
-            weight = arc.get("weight", 0)
-
-            config = archetype_engine.get_config(arc_type)
-            if not config:
-                continue
-
-            speech = config.get("speech", {})
-            style = speech.get("style")
-
-            # -------------------------
-            # 🔥 STYLE TRANSFORMS
-            # -------------------------
-            if style == "visual_punchy" and weight > 0.5:
-                final_text = self._shorten(final_text)
-                final_text = final_text.replace("This works", "This works clean")
-
-            elif style == "casual_fun" and weight > 0.3:
-                final_text = "Okay " + final_text.lower()
-
-            elif style == "minimal_polished" and weight > 0.5:
-                final_text = final_text.replace("!", ".")
-
-            # -------------------------
-            # 🔥 SIGNATURE LINES
-            # -------------------------
-            signatures = speech.get("signature_lines", [])
-            if signatures and weight > 0.4:
-                if random.random() < weight:
-                    final_text += " " + random.choice(signatures)
-
-        return final_text
-
-    # =========================
-    # PERSONALITY LAYER
-    # =========================
-    def _apply_personality(self, text, tone, user_memory):
-
-        interaction = user_memory.get("interaction_style", {})
-
-        # 🔥 confidence boost
-        if tone["sass"] > 15:
-            text = text.replace("It works", "This works really well")
-
-        # 🔥 slang (controlled)
-        if interaction.get("likes_slang") and tone["slang"] > 20:
-            slang_list = self.config.get("slang_libraries", {}).get("gen_z", {}).get("approved_tokens", [])
-            if slang_list:
-                text += " " + random.choice(slang_list[:3])
+        user_profile["memory"] = updated_memory
 
         return text
 
     # =========================
-    # CONSTRAINTS
+    # 🔥 FEEDBACK LEARNING
     # =========================
-    def _apply_constraints(self, text, tone):
+    def _update_learning(self, memory, signals, aesthetic):
+
+        memory = memory or {}
+        prefs = memory.get("tone_preferences", {
+            "energy": "balanced",
+            "style": "neutral"
+        })
+
+        feedback = signals.get("feedback")
+        engagement = signals.get("engagement_level")
+
+        if not aesthetic:
+            return memory
+
+        # -------------------------
+        # POSITIVE SIGNAL
+        # -------------------------
+        if feedback == "like" or engagement == "high":
+
+            if aesthetic.get("energy") == "bold":
+                prefs["energy"] = "bold"
+
+            if aesthetic.get("vibe") == "minimal":
+                prefs["style"] = "minimal"
+
+            if aesthetic.get("vibe") == "street":
+                prefs["style"] = "expressive"
+
+        # -------------------------
+        # NEGATIVE SIGNAL
+        # -------------------------
+        if feedback == "dislike":
+
+            if aesthetic.get("energy") == "bold":
+                prefs["energy"] = "soft"
+
+        memory["tone_preferences"] = prefs
+        return memory
+
+    # =========================
+    # 👤 USER STYLE APPLY
+    # =========================
+    def _apply_user_preference(self, text, prefs):
+
+        if not prefs:
+            return text
+
+        # ENERGY
+        if prefs.get("energy") == "bold":
+            text = text.replace("nice", "strong")
+            text += " This hits."
+
+        elif prefs.get("energy") == "soft":
+            text = text.replace("strong", "easy")
+            text += " Feels effortless."
+
+        # STYLE
+        if prefs.get("style") == "minimal":
+            text = text.replace("Try adding", "You could add")
+
+        elif prefs.get("style") == "expressive":
+            text += " This has personality."
+
+        return text
+
+    # =========================
+    # 🎨 OUTFIT AWARENESS
+    # =========================
+    def _extract_outfit_aesthetic(self, context):
+
+        outfit = context.get("outfit_data", {}) or {}
+        items = outfit.get("items", [])
+
+        colors = [str(i.get("color", "")).lower() for i in items]
+        styles = [str(i.get("style", "")).lower() for i in items]
+
+        dark = {"black", "navy", "charcoal"}
+        light = {"white", "beige", "pastel"}
+
+        dark_score = sum(1 for c in colors if c in dark)
+        light_score = sum(1 for c in colors if c in light)
+
+        return {
+            "energy": "bold" if dark_score > light_score else "soft",
+            "vibe": "street" if "street" in styles else "minimal",
+            "structure": "sharp" if "formal" in styles else "relaxed"
+        }
+
+    def _apply_outfit_tone(self, text, aesthetic):
+
+        if not aesthetic:
+            return text
+
+        if aesthetic.get("structure") == "sharp":
+            text = text.replace("This works", "This is clean")
+
+        if aesthetic.get("vibe") == "street":
+            text += " Lowkey fire."
+
+        if aesthetic.get("vibe") == "minimal":
+            text += " Super clean."
+
+        return text
+
+    # =========================
+    # BASE RULES
+    # =========================
+    def _apply_constraints(self, text, context_rules, emotion_rules):
 
         text = text.replace("!!", "!")
 
-        if tone["emoji"] == 0:
-            text = self._remove_emojis(text)
+        if emotion_rules.get("sentence_style") == "soft":
+            text = text.replace("!", ".")
 
-        if tone["slang"] == 0:
+        if context_rules.get("slang_cap", 0) == 0:
             text = self._remove_slang(text)
 
         return text
 
+    def _remove_slang(self, text):
+        slang_list = self.config.get("slang_libraries", {}).get("gen_z", {}).get("approved_tokens", [])
+        for s in slang_list:
+            text = text.replace(s, "")
+        return text.strip()
+
     # =========================
-    # HELPERS
+    # GENERATION
     # =========================
     def _detect_generation(self, user_profile):
+
         if not user_profile or not user_profile.get("dob_iso"):
             return "other"
 
@@ -187,24 +214,13 @@ class ToneEngine:
         except Exception:
             return "other"
 
-        for name, r in self.config.get("generation_buckets", {}).items():
+        buckets = self.config.get("generation_buckets", {})
+
+        for name, r in buckets.items():
             if r["dob_year_min"] <= year <= r["dob_year_max"]:
                 return name
 
         return "other"
-
-    def _remove_slang(self, text):
-        slang_list = self.config.get("slang_libraries", {}).get("gen_z", {}).get("approved_tokens", [])
-        for s in slang_list:
-            text = text.replace(s, "")
-        return text.strip()
-
-    def _remove_emojis(self, text):
-        return text.encode("ascii", "ignore").decode()
-
-    def _shorten(self, text):
-        sentences = text.split(". ")
-        return ". ".join(sentences[:2])
 
 
 # Singleton

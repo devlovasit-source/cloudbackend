@@ -1,20 +1,25 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Dict, Any
 
 from services.qdrant_service import QdrantService
+from services.embedding_service import embedding_service
 
 router = APIRouter(prefix="/api/feedback")
 
 qdrant = QdrantService()
 
 
-class FeedbackRequest(BaseModel):
+# =========================
+# ITEM FEEDBACK (KEEP)
+# =========================
+class ItemFeedbackRequest(BaseModel):
     item_id: str
     feedback: str  # up / down
 
 
 @router.post("/item")
-def feedback_item(request: FeedbackRequest):
+def feedback_item(request: ItemFeedbackRequest):
 
     fb = request.feedback.lower()
 
@@ -26,7 +31,44 @@ def feedback_item(request: FeedbackRequest):
 
         return {
             "success": True,
-            "message": "Feedback recorded"
+            "message": "Item feedback recorded"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================
+# 🔥 BOARD FEEDBACK (NEW)
+# =========================
+class BoardFeedbackRequest(BaseModel):
+    user_id: str
+    action: str  # like / dislike
+    board_payload: Dict[str, Any]
+
+
+@router.post("/board")
+def feedback_board(request: BoardFeedbackRequest):
+
+    action = request.action.lower()
+
+    if action not in ["like", "dislike"]:
+        raise HTTPException(status_code=400, detail="action must be like/dislike")
+
+    try:
+        # 🔥 Build embedding from board
+        embedding = embedding_service.encode_board(request.board_payload)
+
+        # 🔥 Store in Qdrant
+        qdrant.upsert_user_memory(
+            user_id=request.user_id,
+            vector=embedding,
+            memory_type="liked" if action == "like" else "disliked"
+        )
+
+        return {
+            "success": True,
+            "message": "Board feedback recorded"
         }
 
     except Exception as e:

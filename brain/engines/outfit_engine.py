@@ -2,19 +2,19 @@ import random
 from typing import Any, Dict, List
 
 from brain.engines.style_graph_engine import style_graph_engine
+from brain.engines.style_rules_engine import style_engine
+from brain.engines.palette_engine import palette_engine
 
 
 class OutfitEngine:
     """
-    🔥 ELITE OUTFIT ENGINE
+    🔥 ELITE V3 — STYLIST SYSTEM
 
-    Responsibilities:
-    - Build outfits (deterministic)
-    - Score compatibility
-    - Generate aesthetic signals
-    - Generate description (non-LLM)
-
-    NO LLM HERE. Pure intelligence layer.
+    - Route-based styling (safe / elevated / bold)
+    - Body-aware (StyleRulesEngine)
+    - Palette-first decisions
+    - Graph compatibility
+    - Aesthetic + description included
     """
 
     # =========================
@@ -23,73 +23,173 @@ class OutfitEngine:
     def generate(self, wardrobe: List[Dict[str, Any]], context: Dict[str, Any]):
 
         if not wardrobe:
-            return {"outfits": []}
+            return {"routes": []}
 
+        # ---- SPLIT ----
         tops = [i for i in wardrobe if i.get("category") in ["top", "tops"]]
         bottoms = [i for i in wardrobe if i.get("category") in ["bottom", "bottoms"]]
         shoes = [i for i in wardrobe if i.get("category") in ["shoes", "footwear"]]
         layers = [i for i in wardrobe if i.get("category") in ["outerwear"]]
         accessories = [i for i in wardrobe if i.get("category") in ["accessories", "bags", "jewelry"]]
 
+        # ---- ENGINES ----
         graph = style_graph_engine.build_graph({
             "tops": tops,
             "bottoms": bottoms,
             "shoes": shoes
         })
 
-        outfits = []
+        rules = style_engine.get_scoring_rules(
+            context.get("style_dna", {}),
+            context
+        )
 
-        for _ in range(6):  # generate multiple candidates
-            top = self._pick_anchor(tops)
-            bottom = self._best_match(top, bottoms, graph)
-            shoe = self._best_match(top, shoes, graph)
-            layer = self._optional(layers)
-            accessory = self._optional(accessories)
+        palette = palette_engine.select_palette({
+            "event": context.get("occasion"),
+            "microtheme": context.get("style_dna", {}).get("aesthetic")
+        })
+
+        palette_colors = [c.lower() for c in palette.get("hex", [])]
+
+        # ---- ROUTES ----
+        routes = self._build_routes()
+
+        outputs = []
+
+        for route in routes:
+
+            top = self._pick_by_strategy(tops, route, rules, palette_colors)
+            bottom = self._best_match(top, bottoms, graph, rules, palette_colors)
+            shoe = self._best_match(top, shoes, graph, rules, palette_colors)
+
+            layer = self._best_optional(layers, rules, palette_colors)
+            accessory = self._best_optional(accessories, rules, palette_colors)
 
             items = [x for x in [top, bottom, shoe, layer, accessory] if x]
 
-            score = self._score_outfit(items, graph)
-            aesthetic = self._build_aesthetic(items, context)
-            description = self._build_description(items, aesthetic, context)
+            score = self._score_outfit(items, graph, rules, palette_colors)
+            aesthetic = self._build_aesthetic(items, context, palette, route)
+            description = self._build_route_description(route, aesthetic, context)
 
-            outfits.append({
-                "items": items,
-                "score": round(score, 3),
-                "aesthetic": aesthetic,
-                "description": description
+            outputs.append({
+                "type": route["type"],
+                "label": route["label"],
+                "outfit": {
+                    "items": items,
+                    "score": round(score, 3),
+                    "aesthetic": aesthetic,
+                    "description": description,
+                    "palette": palette.get("name")
+                }
             })
 
-        outfits.sort(key=lambda x: x["score"], reverse=True)
+        outputs.sort(key=lambda x: x["outfit"]["score"], reverse=True)
 
-        return {
-            "outfits": outfits[:3]
-        }
+        return {"routes": outputs}
 
     # =========================
-    # PICKERS
+    # ROUTES
     # =========================
-    def _pick_anchor(self, tops):
-        return random.choice(tops) if tops else None
+    def _build_routes(self):
+        return [
+            {"type": "safe", "label": "Easy Win"},
+            {"type": "elevated", "label": "Sharp Upgrade"},
+            {"type": "bold", "label": "Statement Move"},
+        ]
 
-    def _best_match(self, anchor, candidates, graph):
+    # =========================
+    # STRATEGY PICK
+    # =========================
+    def _pick_by_strategy(self, items, route, rules, palette_colors):
+
+        ranked = self._rank_items(items, rules, palette_colors)
+
+        if not ranked:
+            return None
+
+        if route["type"] == "safe":
+            return ranked[0]
+
+        if route["type"] == "elevated":
+            return ranked[min(1, len(ranked)-1)]
+
+        if route["type"] == "bold":
+            return ranked[min(2, len(ranked)-1)]
+
+        return ranked[0]
+
+    # =========================
+    # RANK ITEMS
+    # =========================
+    def _rank_items(self, items, rules, palette_colors):
+
+        scored = []
+
+        for item in items:
+            score = 0
+            text = str(item).lower()
+
+            if item.get("color", "").lower() in palette_colors:
+                score += 1
+
+            if item.get("color", "").lower() in rules["preferred_colors"]:
+                score += 0.5
+
+            if any(k in text for k in rules["preferred_keywords"]):
+                score += 1
+
+            if item.get("type", "").lower() in rules["avoided_items"]:
+                score -= 2
+
+            scored.append((item, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [x[0] for x in scored]
+
+    # =========================
+    # BEST MATCH
+    # =========================
+    def _best_match(self, anchor, candidates, graph, rules, palette_colors):
+
         if not anchor or not candidates:
             return None
 
         scored = []
+
         for c in candidates:
-            weight = style_graph_engine.pair_weight(graph, anchor.get("id"), c.get("id"))
-            scored.append((c, weight))
+            score = 0
+
+            score += style_graph_engine.pair_weight(
+                graph,
+                anchor.get("id"),
+                c.get("id")
+            )
+
+            if c.get("color", "").lower() in palette_colors:
+                score += 0.5
+
+            if any(k in str(c).lower() for k in rules["preferred_keywords"]):
+                score += 0.5
+
+            scored.append((c, score))
 
         scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[0][0] if scored else None
+        return scored[0][0]
 
-    def _optional(self, items):
-        return random.choice(items) if items and random.random() > 0.5 else None
+    # =========================
+    # OPTIONAL ITEMS
+    # =========================
+    def _best_optional(self, items, rules, palette_colors):
+        if not items:
+            return None
+
+        ranked = self._rank_items(items, rules, palette_colors)
+        return ranked[0] if random.random() > 0.3 else ranked[min(1, len(ranked)-1)]
 
     # =========================
     # SCORING
     # =========================
-    def _score_outfit(self, items, graph):
+    def _score_outfit(self, items, graph, rules, palette_colors):
 
         score = 0
 
@@ -101,21 +201,29 @@ class OutfitEngine:
                     items[j].get("id")
                 )
 
-        # diversity boost
-        categories = set([i.get("category") for i in items])
-        score += len(categories) * 0.2
+        score += sum(
+            0.4 for i in items
+            if i.get("color", "").lower() in palette_colors
+        )
+
+        for i in items:
+            text = str(i).lower()
+
+            if any(k in text for k in rules["preferred_keywords"]):
+                score += 0.3
+
+            if i.get("type", "").lower() in rules["avoided_items"]:
+                score -= 1
 
         return score
 
     # =========================
-    # AESTHETIC INTELLIGENCE
+    # AESTHETIC
     # =========================
-    def _build_aesthetic(self, items, context):
+    def _build_aesthetic(self, items, context, palette, route):
 
         colors = [i.get("color", "").lower() for i in items if i.get("color")]
-        styles = [i.get("style", "").lower() for i in items if i.get("style")]
 
-        # ---- COLOR STORY ----
         if len(set(colors)) == 1:
             color_story = "monochrome"
         elif len(set(colors)) <= 2:
@@ -123,51 +231,36 @@ class OutfitEngine:
         else:
             color_story = "contrast"
 
-        # ---- VIBE ----
-        if "formal" in styles:
-            vibe = "polished"
-        elif "streetwear" in styles:
-            vibe = "street"
-        else:
-            vibe = "clean_minimal"
-
-        # ---- SILHOUETTE ----
-        silhouette = "balanced"
-        if any("oversized" in str(i.get("fit", "")).lower() for i in items):
-            silhouette = "relaxed_top"
-        if any("slim" in str(i.get("fit", "")).lower() for i in items):
-            silhouette = "structured"
+        base_vibe = {
+            "safe": "clean_minimal",
+            "elevated": "structured_refined",
+            "bold": "expressive_statement"
+        }
 
         return {
-            "vibe": vibe,
+            "vibe": base_vibe.get(route["type"]),
             "color_story": color_story,
-            "silhouette": silhouette
+            "palette_name": palette.get("name"),
+            "palette_tags": palette.get("tags", [])
         }
 
     # =========================
-    # DESCRIPTION (NO LLM)
+    # DESCRIPTION
     # =========================
-    def _build_description(self, items, aesthetic, context):
+    def _build_route_description(self, route, aesthetic, context):
 
-        vibe = aesthetic.get("vibe")
-        color = aesthetic.get("color_story")
+        occasion = context.get("occasion", "day out")
 
-        occasion = context.get("occasion") or "day out"
+        if route["type"] == "safe":
+            return f"This is your no-fail look. Clean, balanced, and perfect for {occasion}."
 
-        if vibe == "polished":
-            line = "Clean, sharp, and put-together."
-        elif vibe == "street":
-            line = "Relaxed with an edge."
-        else:
-            line = "Effortless and refined."
+        if route["type"] == "elevated":
+            return f"This feels sharper. More intentional, more styled — ideal for {occasion}."
 
-        color_line = {
-            "monochrome": "The single-tone palette makes it feel elevated.",
-            "balanced": "The color balance keeps it easy and wearable.",
-            "contrast": "The contrast adds visual interest."
-        }.get(color, "")
+        if route["type"] == "bold":
+            return f"This one stands out. Strong presence, high impact — if you're in the mood."
 
-        return f"{line} Perfect for {occasion}. {color_line}".strip()
+        return "Solid option."
 
 
 # Singleton

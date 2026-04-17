@@ -8,17 +8,19 @@ from brain.engines.color_normalizer import color_normalizer
 
 from services.qdrant_service import qdrant_service
 from services.embedding_service import embedding_service
+from services.image_embedding_service import encode_image_url  # 🔥 NEW
 
 
 class UnifiedStyleScorer:
     """
-    🔥 ULTIMATE STYLE BRAIN
+    🔥 ULTIMATE STYLE BRAIN (UPGRADED)
 
     Adds:
     - DNA confidence adaptivity
     - Qdrant learning
     - Conversation memory
-    - 🔥 Exploration boost (low confidence)
+    - Exploration boost
+    - 🔥 Visual similarity (image embeddings)
     """
 
     def score_outfit(
@@ -34,7 +36,6 @@ class UnifiedStyleScorer:
         style_dna = context.get("style_dna", {}) or {}
         confidence = float(style_dna.get("confidence", 0.5))
 
-        # 🔥 NEW
         exploration_factor = max(0.0, 1.0 - confidence)
 
         # =========================
@@ -89,20 +90,25 @@ class UnifiedStyleScorer:
         score += self._aesthetic_score(items)
 
         # =========================
-        # 🔥 4. PERSONALIZATION (ADAPTIVE)
+        # 4. PERSONALIZATION (UPGRADED)
         # =========================
         personalization_weight = 0.3 + (confidence * 0.7)
 
         memory_score = self._memory_score(items, context)
 
         vector = self._build_outfit_embedding(items)
-        qdrant_score = self._qdrant_score(context.get("user_id"), vector)
+
+        # 🔥 SAFETY CHECK
+        if not vector or len(vector) < 100:
+            qdrant_score = 0.0
+        else:
+            qdrant_score = self._qdrant_score(context.get("user_id"), vector)
 
         score += memory_score * personalization_weight
         score += qdrant_score * personalization_weight
 
         # =========================
-        # 🔥 5. EXPLORATION BOOST
+        # 5. EXPLORATION BOOST
         # =========================
         score += self._exploration_boost(items, exploration_factor)
 
@@ -118,18 +124,14 @@ class UnifiedStyleScorer:
 
         score = 0.0
 
-        # 🎨 color diversity boost
         colors = [
             color_normalizer.normalize(i.get("color"))
             for i in items if i.get("color")
         ]
 
-        unique_colors = len(set(colors))
-
-        if unique_colors >= 3:
+        if len(set(colors)) >= 3:
             score += 0.5 * factor
 
-        # 👕 style diversity
         styles = [
             str(i.get("style", "")).lower()
             for i in items if i.get("style")
@@ -138,7 +140,6 @@ class UnifiedStyleScorer:
         if len(set(styles)) >= 2:
             score += 0.4 * factor
 
-        # 🎲 slight randomness (controlled)
         score += random.uniform(0, 0.3) * factor
 
         return score
@@ -168,22 +169,52 @@ class UnifiedStyleScorer:
             if item_type in memory.get("disliked_items", []):
                 score -= 1.2
 
+        # 🔥 small stabilizer boost
+        if memory.get("liked_colors"):
+            score += 0.1
+
         return score
 
     # =========================
-    # EMBEDDING
+    # 🔥 EMBEDDING (UPGRADED)
     # =========================
     def _build_outfit_embedding(self, items: List[Dict[str, Any]]) -> List[float]:
 
+        # TEXT
         text = " ".join([
             f"{i.get('type','')} {i.get('color','')} {i.get('style','')} {i.get('fabric','')}"
             for i in items
         ])
 
-        return embedding_service.encode_text(text)
+        text_vector = embedding_service.encode_text(text) or []
+
+        # IMAGE
+        image_vectors = []
+
+        for item in items[:5]:  # performance guard
+            image_url = item.get("image_url") or item.get("image")
+
+            if image_url:
+                vec = encode_image_url(image_url)
+                if vec and len(vec) >= 100:
+                    image_vectors.append(vec)
+
+        image_vector = []
+        if image_vectors:
+            length = len(image_vectors[0])
+            image_vector = [
+                sum(vec[i] for vec in image_vectors) / len(image_vectors)
+                for i in range(length)
+            ]
+
+        # COMBINE
+        if text_vector and image_vector:
+            return text_vector + image_vector
+
+        return text_vector or image_vector or []
 
     # =========================
-    # QDRANT
+    # 🔥 QDRANT (UPGRADED)
     # =========================
     def _qdrant_score(self, user_id: str, vector: List[float]) -> float:
 
@@ -208,7 +239,10 @@ class UnifiedStyleScorer:
             like_score = sum(r.get("score", 0) for r in liked)
             dislike_score = sum(r.get("score", 0) for r in disliked)
 
-            return (like_score * 1.2) - (dislike_score * 1.5)
+            # 🔥 visual weighting
+            score = (like_score * 1.3) - (dislike_score * 1.5)
+
+            return max(-5.0, min(score, 5.0))
 
         except Exception:
             return 0.0

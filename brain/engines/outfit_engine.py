@@ -10,76 +10,89 @@ from brain.engines.unified_style_scorer import style_scorer
 
 class OutfitEngine:
     """
-    🔥 ELITE V4 — TRUE STYLIST ENGINE
+    🔥 FINAL — DIVERSITY-AWARE STYLIST ENGINE
 
-    - Multi-combination generation
-    - UnifiedStyleScorer driven ranking
-    - Multi-aesthetic aware
-    - Route-based output (safe / elevated / bold)
+    - Generates combinations
+    - Scores via UnifiedStyleScorer
+    - Enforces diversity across outputs
+    - Produces true stylist routes
     """
 
-    # =========================
-    # MAIN ENTRY
-    # =========================
     def generate(self, wardrobe: List[Dict[str, Any]], context: Dict[str, Any]):
 
         if not wardrobe:
             return {"routes": []}
 
-        # ---- SPLIT ----
+        # =========================
+        # SPLIT
+        # =========================
         tops = [i for i in wardrobe if i.get("category") in ["top", "tops"]]
         bottoms = [i for i in wardrobe if i.get("category") in ["bottom", "bottoms"]]
         shoes = [i for i in wardrobe if i.get("category") in ["shoes", "footwear"]]
         layers = [i for i in wardrobe if i.get("category") in ["outerwear"]]
         accessories = [i for i in wardrobe if i.get("category") in ["accessories", "bags", "jewelry"]]
 
-        # ---- GRAPH ----
+        if not tops or not bottoms or not shoes:
+            return {"routes": []}
+
+        # =========================
+        # GRAPH
+        # =========================
         graph = style_graph_engine.build_graph({
             "tops": tops,
             "bottoms": bottoms,
             "shoes": shoes
         })
 
-        # ---- GENERATE COMBINATIONS 🔥 ----
-        outfits = self._generate_candidates(tops, bottoms, shoes, layers, accessories)
+        # =========================
+        # GENERATE
+        # =========================
+        candidates = self._generate_candidates(tops, bottoms, shoes, layers, accessories)
 
-        # ---- SCORE USING ELITE SCORER 🔥 ----
+        # =========================
+        # SCORE
+        # =========================
         scored = []
 
-        for items in outfits:
+        for items in candidates:
             score = style_scorer.score_outfit(items, context, graph)
-            scored.append((items, score))
+            scored.append({
+                "items": items,
+                "score": score
+            })
 
-        # ---- SORT ----
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: x["score"], reverse=True)
 
-        # ---- ROUTE SELECTION ----
-        routes = self._select_routes(scored, context)
+        # =========================
+        # 🔥 DIVERSITY SELECTION
+        # =========================
+        diverse = self._select_diverse_outfits(scored)
+
+        # =========================
+        # ROUTES
+        # =========================
+        routes = self._build_routes(diverse, context)
 
         return {"routes": routes}
 
     # =========================
-    # GENERATE CANDIDATES
+    # CANDIDATES
     # =========================
     def _generate_candidates(self, tops, bottoms, shoes, layers, accessories):
 
+        combos = list(itertools.product(tops, bottoms, shoes))
+        random.shuffle(combos)
+        combos = combos[:30]
+
         candidates = []
 
-        base_combos = list(itertools.product(tops, bottoms, shoes))
-
-        # limit explosion
-        random.shuffle(base_combos)
-        base_combos = base_combos[:25]
-
-        for top, bottom, shoe in base_combos:
+        for top, bottom, shoe in combos:
 
             items = [top, bottom, shoe]
 
-            # optional layering
             if layers and random.random() > 0.5:
                 items.append(random.choice(layers))
 
-            # optional accessory
             if accessories and random.random() > 0.5:
                 items.append(random.choice(accessories))
 
@@ -88,44 +101,86 @@ class OutfitEngine:
         return candidates
 
     # =========================
-    # ROUTE SELECTION
+    # 🔥 DIVERSITY CORE
     # =========================
-    def _select_routes(self, scored, context):
+    def _select_diverse_outfits(self, scored: List[Dict[str, Any]]):
 
         if not scored:
             return []
 
-        outputs = []
+        selected = []
 
-        route_defs = [
-            ("safe", "Easy Win", 0),
-            ("elevated", "Sharp Upgrade", 1),
-            ("bold", "Statement Move", 2),
+        for candidate in scored:
+
+            if not selected:
+                selected.append(candidate)
+                continue
+
+            is_similar = False
+
+            for existing in selected:
+                sim = self._similarity(candidate["items"], existing["items"])
+
+                if sim >= 3:
+                    is_similar = True
+                    break
+
+            if not is_similar:
+                selected.append(candidate)
+
+            if len(selected) >= 3:
+                break
+
+        return selected
+
+    # =========================
+    # SIMILARITY
+    # =========================
+    def _similarity(self, items_a, items_b):
+
+        types_a = set(i.get("type") for i in items_a)
+        types_b = set(i.get("type") for i in items_b)
+
+        colors_a = set(i.get("color") for i in items_a)
+        colors_b = set(i.get("color") for i in items_b)
+
+        return len(types_a & types_b) + len(colors_a & colors_b)
+
+    # =========================
+    # ROUTES
+    # =========================
+    def _build_routes(self, outfits, context):
+
+        routes = []
+
+        labels = [
+            ("safe", "Easy Win"),
+            ("elevated", "Sharp Upgrade"),
+            ("bold", "Statement Move"),
         ]
 
-        for r_type, label, index in route_defs:
+        for i, outfit in enumerate(outfits):
 
-            idx = min(index, len(scored) - 1)
-            items, score = scored[idx]
+            route_type, label = labels[i] if i < len(labels) else ("alt", "Option")
 
-            aesthetic = self._build_aesthetic(items, context, r_type)
-            description = self._build_description(r_type, context)
+            items = outfit["items"]
+            score = outfit["score"]
 
-            outputs.append({
-                "type": r_type,
+            routes.append({
+                "type": route_type,
                 "label": label,
                 "outfit": {
                     "items": items,
                     "score": round(score, 3),
-                    "aesthetic": aesthetic,
-                    "description": description
+                    "aesthetic": self._build_aesthetic(items, context, route_type),
+                    "description": self._build_description(route_type, context)
                 }
             })
 
-        return outputs
+        return routes
 
     # =========================
-    # AESTHETIC BUILDER
+    # AESTHETIC
     # =========================
     def _build_aesthetic(self, items, context, route_type):
 

@@ -169,14 +169,16 @@ class Orchestrator:
     # TEMP WARDROBE
     # =========================
     def _get_temp_wardrobe(self):
-        return [
-            {"type": "shirt", "color": "white", "style": "minimal"},
-            {"type": "t-shirt", "color": "black", "style": "streetwear"},
-            {"type": "jeans", "color": "blue", "style": "casual"},
-            {"type": "trousers", "color": "beige", "style": "formal"},
-            {"type": "sneakers", "color": "white", "style": "casual"},
-            {"type": "loafers", "color": "brown", "style": "formal"},
-        ]
+    return [
+        {"type": "shirt", "color": "white", "category": "top", "style": "minimal"},
+        {"type": "t-shirt", "color": "black", "category": "top", "style": "streetwear"},
+
+        {"type": "jeans", "color": "blue", "category": "bottom", "style": "casual"},
+        {"type": "trousers", "color": "beige", "category": "bottom", "style": "formal"},
+
+        {"type": "sneakers", "color": "white", "category": "footwear", "style": "casual"},
+        {"type": "loafers", "color": "brown", "category": "footwear", "style": "formal"},
+    ]
 
     # =========================
     # SAFE EXECUTION

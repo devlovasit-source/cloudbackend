@@ -3,8 +3,7 @@ from pydantic import BaseModel
 from typing import Dict, Any
 
 from services.qdrant_service import QdrantService
-from services.embedding_service import embedding_service
-
+from services.embedding_service import encode_metadata 
 router = APIRouter(prefix="/api/feedback")
 
 qdrant = QdrantService()
@@ -57,7 +56,7 @@ def feedback_board(request: BoardFeedbackRequest):
 
     try:
         # 🔥 Build embedding from board
-        embedding = embedding_service.encode_board(request.board_payload)
+        embedding = encode_metadata(request.board_payload)
 
         # 🔥 Store in Qdrant
         qdrant.upsert_user_memory(

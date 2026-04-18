@@ -1,17 +1,23 @@
+
 from typing import Dict, Any, List
 import copy
+
+from brain.engines.wardrobe_selector import wardrobe_selector
 
 
 class RefinementEngine:
     """
-    🔥 ADVANCED REFINEMENT ENGINE
+    🔥 FINAL ELITE REFINEMENT ENGINE
 
-    Capabilities:
-    - Chip-driven transformations
-    - Style DNA alignment
-    - Memory-aware personalization
-    - Wardrobe-based replacement (real items)
-    - Safe fallbacks
+    Responsibilities:
+    ✔ apply chip transformations
+    ✔ align with style DNA
+    ✔ align with memory
+    ✔ delegate item selection to wardrobe_selector
+
+    DOES NOT:
+    ❌ perform scoring
+    ❌ rank candidates manually
     """
 
     # =========================
@@ -25,7 +31,6 @@ class RefinementEngine:
         mode = context.get("refinement")
         style_dna = context.get("style_dna", {}) or {}
         memory = context.get("user_memory", {}) or {}
-        wardrobe = context.get("wardrobe", []) or []
 
         refined_outfits = []
 
@@ -34,10 +39,10 @@ class RefinementEngine:
             items = new_outfit.get("items", [])
 
             # -------------------------
-            # 1. CHIP-BASED TRANSFORMATION
+            # 1. CHIP TRANSFORMATION
             # -------------------------
             if mode:
-                items = self._apply_mode(items, mode, context)
+                items = self._apply_mode(items, mode)
 
             # -------------------------
             # 2. STYLE DNA ALIGNMENT
@@ -50,9 +55,9 @@ class RefinementEngine:
             items = self._apply_memory(items, memory)
 
             # -------------------------
-            # 4. WARDROBE SWAP (REAL ITEMS)
+            # 4. REAL WARDROBE SWAP
             # -------------------------
-            items = self._apply_wardrobe_swap(items, wardrobe, context)
+            items = self._apply_wardrobe_swap(items, context)
 
             new_outfit["items"] = items
             new_outfit["refined"] = mode or "auto"
@@ -62,9 +67,9 @@ class RefinementEngine:
         return refined_outfits
 
     # =========================
-    # CHIP MODE LOGIC
+    # CHIP MODE
     # =========================
-    def _apply_mode(self, items, mode, context):
+    def _apply_mode(self, items, mode):
 
         if mode == "sharp":
             return self._make_sharp(items)
@@ -84,8 +89,6 @@ class RefinementEngine:
     # SHARP
     # -------------------------
     def _make_sharp(self, items):
-        new_items = []
-
         for i in items:
             t = str(i.get("type", "")).lower()
 
@@ -97,16 +100,12 @@ class RefinementEngine:
                 i["preferred_replacement"] = "loafers"
                 i["style"] = "formal"
 
-            new_items.append(i)
-
-        return new_items
+        return items
 
     # -------------------------
     # RELAXED
     # -------------------------
     def _make_relaxed(self, items):
-        new_items = []
-
         for i in items:
             t = str(i.get("type", "")).lower()
 
@@ -118,9 +117,7 @@ class RefinementEngine:
                 i["preferred_replacement"] = "sneakers"
                 i["style"] = "casual"
 
-            new_items.append(i)
-
-        return new_items
+        return items
 
     # -------------------------
     # BOLD
@@ -142,7 +139,7 @@ class RefinementEngine:
         return items
 
     # =========================
-    # STYLE DNA ALIGNMENT
+    # STYLE DNA
     # =========================
     def _apply_style_dna(self, items, dna):
 
@@ -154,19 +151,15 @@ class RefinementEngine:
 
         for i in items:
             if preferred_styles:
-                if i.get("style") not in preferred_styles:
-                    i["style_boost"] = False
-                else:
-                    i["style_boost"] = True
+                i["style_boost"] = i.get("style") in preferred_styles
 
             if preferred_colors:
-                if i.get("color") in preferred_colors:
-                    i["color_boost"] = True
+                i["color_boost"] = i.get("color") in preferred_colors
 
         return items
 
     # =========================
-    # MEMORY ALIGNMENT
+    # MEMORY
     # =========================
     def _apply_memory(self, items, memory):
 
@@ -174,8 +167,6 @@ class RefinementEngine:
 
         liked_styles = signals.get("preferred_styles", [])
         disliked_items = signals.get("disliked_items", [])
-
-        new_items = []
 
         for i in items:
             t = str(i.get("type", "")).lower()
@@ -186,17 +177,12 @@ class RefinementEngine:
             if i.get("style") in liked_styles:
                 i["memory_boost"] = True
 
-            new_items.append(i)
-
-        return new_items
+        return items
 
     # =========================
-    # WARDROBE SWAP (REAL)
+    # WARDROBE SWAP (FIXED)
     # =========================
-    def _apply_wardrobe_swap(self, items, wardrobe, context):
-
-        if not wardrobe:
-            return items
+    def _apply_wardrobe_swap(self, items, context):
 
         swapped = []
 
@@ -208,10 +194,11 @@ class RefinementEngine:
                 swapped.append(i)
                 continue
 
-            candidate = self._find_best_item(
+            # 🔥 USE CENTRAL SELECTOR
+            candidate = wardrobe_selector.find_best_match(
                 replacement_type,
-                wardrobe,
-                context
+                context,
+                reference_embedding=i.get("embedding")
             )
 
             if candidate:
@@ -220,34 +207,6 @@ class RefinementEngine:
                 swapped.append(i)
 
         return swapped
-
-    def _find_best_item(self, target_type, wardrobe, context):
-
-        candidates = [
-            w for w in wardrobe
-            if target_type in str(w.get("type", "")).lower()
-        ]
-
-        if not candidates:
-            return None
-
-        # -------------------------
-        # SIMPLE SCORING (CAN UPGRADE)
-        # -------------------------
-        def score(item):
-            s = 0
-
-            if item.get("color") in ["black", "white", "beige"]:
-                s += 1
-
-            if item.get("style") in ["formal", "minimal"]:
-                s += 1
-
-            return s
-
-        candidates.sort(key=score, reverse=True)
-
-        return candidates[0]
 
 
 # singleton

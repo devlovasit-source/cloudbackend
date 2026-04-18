@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 
 from brain.engines.styling.style_builder import style_engine
 from brain.ml.outfit_ranker import outfit_ranker
-from brain.style_graph_engine import style_graph_engine
+from brain.engines.style_graph_engine import style_graph_engine
 from services import ai_gateway
 from services.appwrite_proxy import AppwriteProxy
 from services.embedding_service import get_model

@@ -1,7 +1,7 @@
 import random
 from typing import Any, Dict, List
 
-from brain.engines.palette_engine import palette_engine
+from brain.engines.styling.palette_engine import palette_engine
 from brain.engines.color_normalizer import color_normalizer
 
 

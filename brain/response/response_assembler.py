@@ -1,6 +1,7 @@
+
 import logging
 import os
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List
 
 from brain.tone.tone_engine import tone_engine
 from services.llm_service import (
@@ -33,27 +34,25 @@ class ResponseAssembler:
 
         data = merged_output.get("data", {})
         outfits = data.get("outfits", [])
+        boards = data.get("boards", [])
 
         if not outfits:
             return self._wrap_response(
-                "Nothing strong yet — want me to refine it?",
-                context
+                "I need a bit more to work with — want me to refine it?",
+                context,
+                chips=["Show outfit ideas", "Try different vibe"]
             )
 
         user_profile = context.get("user_profile", {})
-        style_dna = context.get("style_dna", {})
         signals = context.get("signals", {})
 
-        best = outfits[0]
-        items = best.get("items", [])
+        # -------------------------
+        # BASE VISUAL TEXT
+        # -------------------------
+        base_text = self._build_visual_explanation(outfits[0], context)
 
         # -------------------------
-        # BASE VISUAL LOGIC
-        # -------------------------
-        base_text = self._build_visual_explanation(items, context)
-
-        # -------------------------
-        # 🔥 LLM ENHANCEMENT
+        # LLM ENHANCEMENT
         # -------------------------
         if self._llm_enabled():
             try:
@@ -61,21 +60,26 @@ class ResponseAssembler:
                     outfits=outfits,
                     context=context,
                     user_profile=user_profile,
-                    style_dna=style_dna,
                     signals=signals,
                 )
+
+                if isinstance(llm_text, dict):
+                    llm_text = llm_text.get("content", "")
+
                 if llm_text:
                     base_text = llm_text
+
             except Exception as e:
                 logger.warning("LLM styling failed: %s", e)
 
         # -------------------------
-        # FINAL MESSAGE BUILD
+        # FINAL MESSAGE (PERSONALITY RESTORED)
         # -------------------------
         message = self._compose([
             self._proactive_prefix(signals),
-            self._reaction(False),
-            base_text
+            self._reaction(),
+            base_text,
+            self._closer()
         ])
 
         message = tone_engine.apply(
@@ -85,11 +89,17 @@ class ResponseAssembler:
         )
 
         # -------------------------
-        # ACTIONS (CHIPS)
+        # CHIPS
         # -------------------------
-        actions = self._safe_actions(context, outfits)
+        chips = self._safe_actions(context)
 
-        return self._wrap_response(message, context, actions=actions)
+        return self._wrap_response(
+            message,
+            context,
+            chips=chips,
+            cards=boards,
+            data={"outfits": outfits}
+        )
 
     # =========================
     # 🧠 MULTI DOMAIN
@@ -102,7 +112,6 @@ class ResponseAssembler:
 
         base_text = merged_output.get("message") or self._fallback(data)
 
-        # optional polish
         if self._llm_enabled():
             try:
                 improved = generate_style_advice(
@@ -117,7 +126,7 @@ class ResponseAssembler:
                 logger.warning("LLM multi-domain failed: %s", e)
 
         message = self._compose([
-            self._reaction(True),
+            self._reaction(),
             base_text,
             self._closer()
         ])
@@ -128,22 +137,39 @@ class ResponseAssembler:
             signals=signals,
         )
 
-        return self._wrap_response(message, context)
+        return self._wrap_response(
+            message,
+            context,
+            chips=self._safe_actions(context),
+            data=data
+        )
 
     # =========================
-    # 🔥 CORE BUILDERS
+    # 🔥 RESPONSE WRAPPER (RESTORED CLEANLY)
     # =========================
-    def _wrap_response(self, text: str, context: dict, actions: List[str] = None) -> dict:
+    def _wrap_response(
+        self,
+        text: str,
+        context: dict,
+        chips: List[str] = None,
+        cards: List[dict] = None,
+        data: Dict[str, Any] = None
+    ) -> dict:
+
         return {
             "message": {
                 "role": "assistant",
                 "content": text.strip()
             },
-            "chips": actions or [],
-            "board_ids": context.get("board_ids"),
-            "pack_id": context.get("pack_id"),
+            "chips": chips or [],
+            "cards": cards or [],
+            "data": data or {},
+            "meta": context.get("intent_meta", {})
         }
 
+    # =========================
+    # 🧠 TEXT COMPOSER (LIMIT RESTORED)
+    # =========================
     def _compose(self, parts: List[str]) -> str:
         parts = [p for p in parts if p]
         text = " ".join(parts)
@@ -157,37 +183,35 @@ class ResponseAssembler:
     # =========================
     # 🧠 VISUAL INTELLIGENCE
     # =========================
-    def _build_visual_explanation(self, items, context):
+    def _build_visual_explanation(self, outfit, context):
+
+        items = outfit.get("items", []) if isinstance(outfit, dict) else []
 
         if not items:
-            return "This is a clean look."
+            return "Clean and balanced look."
 
         colors = [i.get("color") for i in items if i]
-        styles = [i.get("style") for i in items if i]
 
         parts = []
 
         if len(set(colors)) == 1:
             parts.append("The monochrome palette keeps it sharp.")
         else:
-            parts.append("The colors balance well without clashing.")
-
-        if len(set(styles)) == 1 and styles[0]:
-            parts.append(f"It leans into a {styles[0]} aesthetic.")
+            parts.append("The colors balance nicely without clashing.")
 
         if context.get("occasion"):
-            parts.append(f"It works naturally for {context.get('occasion')}.")
+            parts.append(f"It works well for {context.get('occasion')}.")
 
         return " ".join(parts)
 
     # =========================
     # 🧩 HELPERS
     # =========================
-    def _safe_actions(self, context, outfits):
+    def _safe_actions(self, context):
         try:
-            return generate_followup_suggestions(context, outfits)
+            return generate_followup_suggestions(context)
         except Exception:
-            return ["Make it sharper", "More relaxed", "Change colors"]
+            return ["Make it sharper", "Change colors", "Try another vibe"]
 
     def _llm_enabled(self):
         return os.getenv("ENABLE_LLM_SYNTHESIS", "true").lower() in ("1", "true")
@@ -199,18 +223,15 @@ class ResponseAssembler:
             return "This fits your evening."
         return ""
 
-    def _reaction(self, multi):
-        return (
-            "I’ve put this together for you."
-            if multi else "This is a strong look."
-        )
+    def _reaction(self):
+        return "This is a strong look."
 
     def _closer(self):
-        return "Want to refine this?"
+        return "Want me to tweak it?"
 
     def _fallback(self, data: dict) -> str:
         if not data:
-            return "I couldn’t find anything meaningful."
+            return "I couldn’t find anything solid yet."
 
         chunks = []
         for k, v in data.items():

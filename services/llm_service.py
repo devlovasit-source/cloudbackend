@@ -121,7 +121,7 @@ Rules:
     data = _call_ollama(payload, timeout=timeout_seconds)
 
     if not data:
-        return "none"
+        return ""
 
     response = data.get("response", "").strip()
     return tone_engine.apply(response, user_profile=user_profile, signals=signals)

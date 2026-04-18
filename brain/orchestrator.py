@@ -9,7 +9,7 @@ from brain.engines.styling.palette_engine import palette_engine
 from brain.engines.style_board_engine import style_board_engine
 from brain.engines.style_board_renderer import style_board_renderer
 
-from brain.logic.archetype_learning_engine import archetype_learning_engine
+from brain.tone.archetype_learning_engine import archetype_learning_engine
 
 from brain.response.assembler import response_assembler
 from brain.tone.tone_engine import tone_engine

@@ -10,7 +10,6 @@ from brain.engines.style_board_renderer import style_board_renderer
 
 from brain.tone.archetype_learning_engine import archetype_learning_engine
 from brain.response.response_assembler import response_assembler
-from brain.tone.tone_engine import tone_engine
 
 from services.qdrant_service import qdrant_service
 from services.embedding_service import embedding_service
@@ -18,10 +17,10 @@ from services.embedding_service import embedding_service
 
 class Orchestrator:
     """
-    🔥 ELITE ORCHESTRATOR
+    🔥 CLEAN PRODUCTION ORCHESTRATOR
 
     Flow:
-    Intent → Context → Outfit Generation → Scoring → Ranking → Boards → Memory → Response
+    Intent → Context → Outfit → Scoring → Boards → Response Assembly → Contract
     """
 
     # =========================
@@ -36,7 +35,9 @@ class Orchestrator:
         context = self._build_context(user, slots)
         context["intent"] = intent
 
-        # 🔥 MODES
+        # -------------------------
+        # MODES
+        # -------------------------
         if slots.get("mode") == "feed":
             return self._build_feed(context)
 
@@ -49,26 +50,34 @@ class Orchestrator:
         if slots.get("feedback"):
             return self._feedback(context)
 
-        # 🔥 ROUTING
+        # -------------------------
+        # MAIN ROUTING
+        # -------------------------
         if intent == "styling":
             result = self._handle_styling(context)
         else:
-            result = {"message": "Tell me what you need — styling, meals, or plans."}
+            result = {
+                "type": "text",
+                "message": "Tell me what you need — styling, meals, or plans.",
+                "data": {}
+            }
 
-        # 🔥 RESPONSE ASSEMBLY
-        final_response = response_assembler.assemble(result, context)
+        # -------------------------
+        # 🔥 RESPONSE ASSEMBLY (STRING)
+        # -------------------------
+        message = response_assembler.assemble(result, context)
 
-        # 🔥 FINAL TONE
-        final_response["message"] = tone_engine.apply(
-            final_response.get("message", ""),
-            user_profile=context.get("user_profile"),
-            signals={
-                "context_mode": "styling",
-                "aesthetic": context.get("aesthetic"),
-            },
-        )
-
-        return final_response
+        # -------------------------
+        # 🔥 FINAL CONTRACT (VERY IMPORTANT)
+        # -------------------------
+        return {
+            "success": True,
+            "message": message,
+            "data": result.get("data", {}),
+            "meta": {
+                "type": result.get("type", "text")
+            }
+        }
 
     # =========================
     # CONTEXT
@@ -87,7 +96,7 @@ class Orchestrator:
         }
 
     # =========================
-    # 🔥 STYLING CORE (UPGRADED)
+    # 🔥 STYLING CORE
     # =========================
     def _handle_styling(self, context):
 
@@ -95,17 +104,17 @@ class Orchestrator:
         outfits = result.get("outfits", [])
 
         if not outfits:
-            return {"message": "I couldn't build outfits yet."}
+            return {
+                "type": "styling",
+                "message": "I couldn't build outfits yet.",
+                "data": {}
+            }
 
         scored_outfits = []
 
-        # 🔥 CORE INTELLIGENCE LAYER
         for o in outfits:
-
-            # embedding
             o["embedding"] = self._embed_outfit(o, context)
 
-            # 🔥 SCORING (MAIN BRAIN)
             score_data = style_scorer.score_outfit(o, context)
 
             o["final_score"] = score_data.get("score", 0)
@@ -114,7 +123,6 @@ class Orchestrator:
 
             scored_outfits.append(o)
 
-        # 🔥 SORT BY INTELLIGENCE
         scored_outfits.sort(key=lambda x: x["final_score"], reverse=True)
 
         selected = scored_outfits[:3]
@@ -127,7 +135,6 @@ class Orchestrator:
 
             embedding = outfit.get("embedding")
 
-            # 🔥 MEMORY STORAGE (QDRANT)
             qdrant_service.upsert_style_board(
                 board_id=outfit.get("id"),
                 vector=embedding,
@@ -153,9 +160,11 @@ class Orchestrator:
 
         return {
             "type": "styling",
-            "outfits": selected,
-            "boards": boards,
-            "message": selected[0].get("description", "")
+            "message": selected[0].get("description", ""),
+            "data": {
+                "outfits": selected,
+                "boards": boards
+            }
         }
 
     # =========================
@@ -170,10 +179,8 @@ class Orchestrator:
 
         for o in outfits:
             o["embedding"] = self._embed_outfit(o, context)
-
             score_data = style_scorer.score_outfit(o, context)
             o["final_score"] = score_data.get("score", 0)
-
             enriched.append(o)
 
         enriched.sort(key=lambda x: x["final_score"], reverse=True)
@@ -192,7 +199,10 @@ class Orchestrator:
                 "score": o.get("final_score"),
             })
 
-        return {"type": "feed", "data": feed}
+        return {
+            "type": "feed",
+            "data": feed
+        }
 
     # =========================
     # EXPLORE
@@ -207,7 +217,10 @@ class Orchestrator:
 
         ranked = self._rank_boards(boards, user_vector)
 
-        return {"type": "explore", "data": ranked[:20]}
+        return {
+            "type": "explore",
+            "data": ranked[:20]
+        }
 
     # =========================
     # SIMILAR
@@ -221,7 +234,10 @@ class Orchestrator:
             limit=15
         )
 
-        return {"type": "similar", "data": results}
+        return {
+            "type": "similar",
+            "data": results
+        }
 
     # =========================
     # FEEDBACK
@@ -241,7 +257,10 @@ class Orchestrator:
 
         memory = archetype_learning_engine.update(memory, signals)
 
-        return {"type": "feedback", "data": memory}
+        return {
+            "type": "feedback",
+            "data": memory
+        }
 
     # =========================
     # EMBEDDING

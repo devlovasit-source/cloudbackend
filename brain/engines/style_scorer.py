@@ -7,7 +7,7 @@ from brain.engines.palette_engine import palette_engine
 from brain.engines.color_normalizer import color_normalizer
 
 from services.qdrant_service import qdrant_service
-from services.embedding_service import embedding_service
+from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_url  # 🔥 NEW
 
 

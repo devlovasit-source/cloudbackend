@@ -1,3 +1,4 @@
+
 import base64
 import time
 from typing import Any, Dict
@@ -49,7 +50,7 @@ class Orchestrator:
             "mode": slots.get("mode"),
         })
 
-        # ✅ TEMP WARDROBE (ONLY IF EMPTY)
+        # TEMP WARDROBE
         if not context.get("wardrobe"):
             print("⚠️ Using TEMP wardrobe")
             context["wardrobe"] = self._get_temp_wardrobe()
@@ -68,9 +69,7 @@ class Orchestrator:
 
         context = proactive_engine.inject(context)
 
-        # -------------------------
-        # ROUTING (UNCHANGED)
-        # -------------------------
+        # ROUTING
         if context.get("proactive_signals"):
             result = self._handle_styling(context)
 
@@ -123,9 +122,6 @@ class Orchestrator:
             }
         }
 
-    # =========================
-    # CONTEXT BUILDER
-    # =========================
     def _build_context(self, user):
 
         memory = user.get("memory", {}) or {}
@@ -141,9 +137,6 @@ class Orchestrator:
             "refinement": user.get("refinement"),
         }
 
-    # =========================
-    # ✅ FIXED TEMP WARDROBE
-    # =========================
     def _get_temp_wardrobe(self):
         return [
             {"type": "shirt", "color": "white", "category": "top", "style": "minimal"},
@@ -154,9 +147,6 @@ class Orchestrator:
             {"type": "loafers", "color": "brown", "category": "footwear", "style": "formal"},
         ]
 
-    # =========================
-    # SAFE EXECUTION
-    # =========================
     def _safe(self, fn, fallback):
         try:
             return fn()
@@ -164,17 +154,27 @@ class Orchestrator:
             print("ERROR:", e)
             return fallback
 
-    # =========================
-    # STYLING CORE (UNCHANGED)
-    # =========================
     def _handle_styling(self, context):
 
+        # ✅ FIXED ENGINE CALL
         result = self._safe(
-            lambda: outfit_engine.generate(context),
-            {"outfits": []}
+            lambda: outfit_engine.generate(
+                context.get("wardrobe", []),
+                context
+            ),
+            {"routes": []}
         )
 
-        outfits = result.get("outfits", [])
+        # ✅ ROUTES → OUTFITS
+        routes = result.get("routes", [])
+
+        outfits = []
+        for r in routes:
+            outfit = r.get("outfit", {})
+            if outfit:
+                outfit["route_type"] = r.get("type")
+                outfit["route_label"] = r.get("label")
+                outfits.append(outfit)
 
         print("OUTFITS GENERATED:", len(outfits))
 
@@ -227,7 +227,6 @@ class Orchestrator:
             board = style_board_engine.build_board(o, context)
             image = style_board_renderer.render(board)
 
-            # 🔥 KEEP QDRANT (NOT REMOVED)
             self._safe(
                 lambda: qdrant_service.upsert_style_board(
                     board_id=o.get("id"),
@@ -251,6 +250,8 @@ class Orchestrator:
                 "label": o.get("label"),
                 "reasons": o.get("reasons"),
                 "refined": o.get("refined"),
+                "route_type": o.get("route_type"),
+                "route_label": o.get("route_label")
             })
 
         context["aesthetic"] = selected[0].get("aesthetic")
@@ -263,21 +264,11 @@ class Orchestrator:
             }
         }
 
-    # =========================
-    # KEEP ALL OTHER METHODS
-    # =========================
-
     def _build_feed(self, context):
-        return {
-            "type": "feed",
-            "data": []
-        }
+        return {"type": "feed", "data": []}
 
     def _explore(self, context):
-        return {
-            "type": "explore",
-            "data": qdrant_service.get_all_boards(limit=50)
-        }
+        return {"type": "explore", "data": qdrant_service.get_all_boards(limit=50)}
 
     def _similar(self, context):
         return {

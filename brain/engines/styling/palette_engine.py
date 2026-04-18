@@ -85,4 +85,7 @@ class PaletteEngine:
         }
 
 
-# Singleton
+# =========================
+# SINGLETON INSTANCE
+# =========================
+palette_engine = PaletteEngine()

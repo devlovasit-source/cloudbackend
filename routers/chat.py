@@ -105,9 +105,14 @@ def text_chat(request: TextChatRequest, http_request: Request):
     user_id = request.user_id or request.userID or "user_1"
 
     # -------------------------
+    # CHIP SUPPORT (🔥 NEW)
+    # -------------------------
+    chip = http_request.query_params.get("chip")
+
+    # -------------------------
     # CACHE
     # -------------------------
-    cache_key = _cache_key(user_input, user_id)
+    cache_key = _cache_key(user_input + (chip or ""), user_id)
     cached = _get_cached(_CHAT_CACHE, cache_key)
     if cached:
         return cached
@@ -155,6 +160,18 @@ def text_chat(request: TextChatRequest, http_request: Request):
         pass
 
     # -------------------------
+    # LOAD WARDROBE (🔥 CRITICAL)
+    # -------------------------
+    try:
+        wardrobe_docs = AppwriteProxy().list_documents(
+            "outfits",
+            user_id=user_id,
+            limit=200
+        )
+    except Exception:
+        wardrobe_docs = []
+
+    # -------------------------
     # ORCHESTRATOR
     # -------------------------
     def run():
@@ -164,7 +181,8 @@ def text_chat(request: TextChatRequest, http_request: Request):
                 "user_id": user_id,
                 "profile": request.user_profile,
                 "memory": request.current_memory,
-                "wardrobe": [],
+                "wardrobe": wardrobe_docs,
+                "refinement": chip,  # 🔥 key integration
             }
         )
 
@@ -174,14 +192,24 @@ def text_chat(request: TextChatRequest, http_request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    message = result.get("message", "")
+    # -------------------------
+    # HANDLE RESPONSE
+    # -------------------------
+    assembled = result.get("message")
+
+    if isinstance(assembled, dict):
+        message_text = assembled.get("content") or assembled.get("message")
+        actions = result.get("chips", []) or assembled.get("chips", [])
+    else:
+        message_text = assembled
+        actions = result.get("actions", [])
 
     # -------------------------
     # TRANSLATE BACK
     # -------------------------
     try:
-        if target_lang != "en" and message:
-            message = GoogleTranslator(source="en", target=target_lang).translate(message)
+        if target_lang != "en" and message_text:
+            message_text = GoogleTranslator(source="en", target=target_lang).translate(message_text)
     except Exception:
         pass
 
@@ -189,7 +217,7 @@ def text_chat(request: TextChatRequest, http_request: Request):
     # AUDIO
     # -------------------------
     try:
-        audio_job_id = enqueue_task(run_heavy_audio_task, args=[message, target_lang]) \
+        audio_job_id = enqueue_task(run_heavy_audio_task, args=[message_text, target_lang]) \
             if run_heavy_audio_task else "offline"
     except Exception:
         audio_job_id = "offline"
@@ -199,12 +227,14 @@ def text_chat(request: TextChatRequest, http_request: Request):
     # -------------------------
     response = {
         "success": True,
-        "message": message,
+        "message": message_text,
+        "chips": actions,  # 🔥 important
         "cards": result.get("data", {}).get("boards", []),
         "data": result.get("data", {}),
         "meta": {
             **(result.get("meta") or {}),
             "weather": weather,
+            "refinement": chip,
         },
         "audio_job_id": audio_job_id,
     }

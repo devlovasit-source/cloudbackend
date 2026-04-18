@@ -5,7 +5,7 @@ from brain.nlu.intent_router import nlu_router
 
 from brain.engines.outfit_engine import outfit_engine
 from brain.engines.style_graph_engine import style_graph_engine
-from brain.engines.palette_engine import palette_engine
+from brain.engines.styling.palette_engine import palette_engine
 from brain.engines.style_board_engine import style_board_engine
 from brain.engines.style_board_renderer import style_board_renderer
 

@@ -4,26 +4,24 @@ from typing import Any, Dict, List
 from brain.nlu.intent_router import nlu_router
 
 from brain.engines.outfit_engine import outfit_engine
-from brain.engines.style_graph_engine import style_graph_engine
-from brain.engines.styling.palette_engine import palette_engine
+from brain.engines.style_scorer import style_scorer
 from brain.engines.style_board_engine import style_board_engine
 from brain.engines.style_board_renderer import style_board_renderer
 
 from brain.tone.archetype_learning_engine import archetype_learning_engine
-
 from brain.response.response_assembler import response_assembler
 from brain.tone.tone_engine import tone_engine
 
 from services.qdrant_service import qdrant_service
-from services.embedding_service import encode_metadata
+from services.embedding_service import embedding_service
 
 
 class Orchestrator:
     """
-    🔥 FINAL INTELLIGENT ORCHESTRATOR
+    🔥 ELITE ORCHESTRATOR
 
     Flow:
-    Intent → Context → Outfit → Boards → Embeddings → Ranking → Response
+    Intent → Context → Outfit Generation → Scoring → Ranking → Boards → Memory → Response
     """
 
     # =========================
@@ -57,12 +55,12 @@ class Orchestrator:
         else:
             result = {"message": "Tell me what you need — styling, meals, or plans."}
 
-        # 🔥 ASSEMBLY
-        response = response_assembler.assemble(result, context)
+        # 🔥 RESPONSE ASSEMBLY
+        final_response = response_assembler.assemble(result, context)
 
         # 🔥 FINAL TONE
-        response["message"] = tone_engine.apply(
-            response.get("message", ""),
+        final_response["message"] = tone_engine.apply(
+            final_response.get("message", ""),
             user_profile=context.get("user_profile"),
             signals={
                 "context_mode": "styling",
@@ -70,7 +68,7 @@ class Orchestrator:
             },
         )
 
-        return response
+        return final_response
 
     # =========================
     # CONTEXT
@@ -89,7 +87,7 @@ class Orchestrator:
         }
 
     # =========================
-    # STYLING CORE
+    # 🔥 STYLING CORE (UPGRADED)
     # =========================
     def _handle_styling(self, context):
 
@@ -99,13 +97,27 @@ class Orchestrator:
         if not outfits:
             return {"message": "I couldn't build outfits yet."}
 
-        # 🔥 EMBEDDING + RANKING
+        scored_outfits = []
+
+        # 🔥 CORE INTELLIGENCE LAYER
         for o in outfits:
+
+            # embedding
             o["embedding"] = self._embed_outfit(o, context)
 
-        outfits = self._rank_outfits(outfits, context)
+            # 🔥 SCORING (MAIN BRAIN)
+            score_data = style_scorer.score_outfit(o, context)
 
-        selected = outfits[:3]
+            o["final_score"] = score_data.get("score", 0)
+            o["label"] = score_data.get("label", "Look")
+            o["reasons"] = score_data.get("reasons", [])
+
+            scored_outfits.append(o)
+
+        # 🔥 SORT BY INTELLIGENCE
+        scored_outfits.sort(key=lambda x: x["final_score"], reverse=True)
+
+        selected = scored_outfits[:3]
 
         boards = []
 
@@ -115,7 +127,7 @@ class Orchestrator:
 
             embedding = outfit.get("embedding")
 
-            # 🔥 STORE IN QDRANT
+            # 🔥 MEMORY STORAGE (QDRANT)
             qdrant_service.upsert_style_board(
                 board_id=outfit.get("id"),
                 vector=embedding,
@@ -132,35 +144,43 @@ class Orchestrator:
                 "embedding": embedding,
                 "aesthetic": outfit.get("aesthetic"),
                 "description": outfit.get("description"),
+                "score": outfit.get("final_score"),
+                "label": outfit.get("label"),
+                "reasons": outfit.get("reasons"),
             })
 
         context["aesthetic"] = selected[0].get("aesthetic")
 
         return {
             "type": "styling",
-            "data": {
-                "outfits": selected,
-                "style_boards": boards
-            },
+            "outfits": selected,
+            "boards": boards,
             "message": selected[0].get("description", "")
         }
 
     # =========================
-    # FEED (REELS)
+    # FEED
     # =========================
     def _build_feed(self, context):
 
         result = outfit_engine.generate(context)
         outfits = result.get("outfits", [])
 
+        enriched = []
+
         for o in outfits:
             o["embedding"] = self._embed_outfit(o, context)
 
-        outfits = self._rank_outfits(outfits, context)
+            score_data = style_scorer.score_outfit(o, context)
+            o["final_score"] = score_data.get("score", 0)
+
+            enriched.append(o)
+
+        enriched.sort(key=lambda x: x["final_score"], reverse=True)
 
         feed = []
 
-        for o in outfits[:10]:
+        for o in enriched[:10]:
             board = style_board_engine.build_board(o, context)
             image = style_board_renderer.render(board)
 
@@ -169,6 +189,7 @@ class Orchestrator:
                 "image_base64": base64.b64encode(image).decode(),
                 "embedding": o.get("embedding"),
                 "description": o.get("description"),
+                "score": o.get("final_score"),
             })
 
         return {"type": "feed", "data": feed}
@@ -227,7 +248,7 @@ class Orchestrator:
     # =========================
     def _embed_outfit(self, outfit, context):
 
-        return encode_metadata({
+        return embedding_service.encode_metadata({
             "aesthetic": outfit.get("aesthetic"),
             "colors": outfit.get("colors"),
             "category": outfit.get("category"),
@@ -235,26 +256,8 @@ class Orchestrator:
         })
 
     # =========================
-    # RANKING
+    # RANKING HELPERS
     # =========================
-    def _rank_outfits(self, outfits, context):
-
-        memory = context.get("user_memory", {})
-        user_vector = self._build_user_vector(memory)
-
-        def score(o):
-            base = o.get("final_score", 0)
-
-            if user_vector and o.get("embedding"):
-                sim = qdrant_service.cosine_similarity(
-                    user_vector, o["embedding"]
-                )
-                base += sim * 2
-
-            return base
-
-        return sorted(outfits, key=score, reverse=True)
-
     def _rank_boards(self, boards, user_vector):
 
         if not user_vector:

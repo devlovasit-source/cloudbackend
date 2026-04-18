@@ -1,3 +1,4 @@
+
 from typing import Dict, List, Any
 import time
 from services.qdrant_service import qdrant_service
@@ -5,18 +6,18 @@ from services.qdrant_service import qdrant_service
 
 class MemoryScorer:
     """
-    🔥 ELITE MEMORY SCORER
+    🔥 FINAL ELITE MEMORY SCORER
 
-    Combines:
-    - temporal embedding memory
-    - explicit signals
-    - session awareness (highest priority)
-    - collaborative filtering (similar users)
+    Layers:
+    1. Session (derived, weighted)
+    2. Temporal embedding memory
+    3. Explicit signals
+    4. Collaborative filtering (bounded)
 
-    Final range: ~ -4 to +4
+    Stable + production safe
     """
 
-    HALF_LIFE_HOURS = 72  # temporal decay
+    HALF_LIFE_HOURS = 72
 
     # =========================
     # MAIN API
@@ -28,48 +29,48 @@ class MemoryScorer:
 
         score = 0.0
 
-        # -------------------------
-        # PRIORITY ORDER
-        # -------------------------
-        score += self._session_score(context)                # 🔥 strongest
-        score += self._embedding_score(context, embedding)   # temporal
-        score += self._explicit_score(context)               # signals
-        score += self._cluster_score(context, embedding)     # collaborative
+        session_score = self._session_score(context)
+        embedding_score = self._embedding_score(context, embedding)
+        explicit_score = self._explicit_score(context)
+        cluster_score = self._cluster_score(context)
 
         # -------------------------
-        # STABILITY CLAMP
+        # WEIGHTED COMBINATION
         # -------------------------
-        return max(-4.0, min(score, 4.0))
+        score += session_score
+        score += embedding_score
+        score += explicit_score
+        score += cluster_score
+
+        # -------------------------
+        # CLAMP
+        # -------------------------
+        return max(-3.0, min(score, 3.0))
 
     # =========================
-    # 🔥 SESSION (HIGHEST PRIORITY)
+    # 🔥 SESSION (DERIVED)
     # =========================
     def _session_score(self, context: Dict[str, Any]) -> float:
 
-        session = context.get("session", {})
+        session = context.get("session", {}).get("derived", {})
         if not session:
             return 0.0
 
         score = 0.0
 
-        # latest refinement dominates
-        history = session.get("refinement_history", [])
+        dominant = session.get("dominant_refinement")
 
-        if history:
-            latest = history[-1]["value"]
+        if dominant == "sharp":
+            score += 0.7
+        elif dominant == "relaxed":
+            score += 0.7
+        elif dominant == "minimal":
+            score += 0.6
+        elif dominant == "bold":
+            score += 0.6
 
-            if latest == "sharp":
-                score += 0.8
-            elif latest == "relaxed":
-                score += 0.8
-            elif latest == "minimal":
-                score += 0.7
-            elif latest == "bold":
-                score += 0.7
-
-        # occasion override
-        if session.get("occasion"):
-            score += 0.5
+        if context.get("session", {}).get("occasion"):
+            score += 0.4
 
         return score
 
@@ -112,21 +113,19 @@ class MemoryScorer:
 
             score = 0.0
 
-            # liked
             for r in liked:
                 sim = r.get("score", 0)
                 ts = r.get("timestamp")
                 w = self._time_weight(ts)
 
-                score += sim * w * 1.4
+                score += sim * w * 1.3
 
-            # disliked
             for r in disliked:
                 sim = r.get("score", 0)
                 ts = r.get("timestamp")
                 w = self._time_weight(ts)
 
-                score -= sim * w * 1.7
+                score -= sim * w * 1.6
 
             return score
 
@@ -150,20 +149,20 @@ class MemoryScorer:
         weight = self._time_weight(ts)
 
         if signals.get("preferred_styles"):
-            score += 0.4 * weight
-
-        if signals.get("liked_colors"):
             score += 0.3 * weight
 
+        if signals.get("liked_colors"):
+            score += 0.25 * weight
+
         if signals.get("explore_colors"):
-            score += 0.15 * weight
+            score += 0.1 * weight
 
         return score
 
     # =========================
-    # 🔥 COLLABORATIVE FILTERING
+    # 🔥 CLUSTER (BOUNDED)
     # =========================
-    def _cluster_score(self, context: Dict, embedding: List[float]) -> float:
+    def _cluster_score(self, context: Dict) -> float:
 
         user_id = context.get("user_id")
         memory = context.get("user_memory", {})
@@ -182,15 +181,12 @@ class MemoryScorer:
             if not similar_users:
                 return 0.0
 
-            score = 0.0
+            score = sum(u.get("score", 0) for u in similar_users)
 
-            for u in similar_users:
-                sim = u.get("score", 0)
+            # 🔥 normalize + cap
+            score = score / max(len(similar_users), 1)
 
-                # weaker than personal memory
-                score += sim * 0.4
-
-            return score
+            return min(score * 0.4, 0.8)  # HARD CAP
 
         except Exception:
             return 0.0

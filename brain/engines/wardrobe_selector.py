@@ -4,13 +4,21 @@ from services.qdrant_service import qdrant_service
 
 class WardrobeSelector:
     """
-    🔥 ADVANCED WARDROBE SELECTOR
+    🔥 CLEAN WARDROBE SELECTOR (FINAL)
 
-    Chooses best real item from user's wardrobe using:
-    - embedding similarity
-    - memory preferences
-    - style DNA alignment
-    - color harmony
+    Responsibility:
+    - Select best matching item from user's wardrobe
+
+    DOES:
+    ✔ filter by type
+    ✔ embedding similarity (primary signal)
+    ✔ safe fallback
+
+    DOES NOT:
+    ❌ memory scoring
+    ❌ style DNA scoring
+    ❌ palette scoring
+    ❌ refinement scoring
     """
 
     # =========================
@@ -27,6 +35,11 @@ class WardrobeSelector:
         if not wardrobe:
             return None
 
+        target_type = str(target_type or "").lower().strip()
+
+        # -------------------------
+        # FILTER BY TYPE
+        # -------------------------
         candidates = [
             w for w in wardrobe
             if target_type in str(w.get("type", "")).lower()
@@ -35,138 +48,65 @@ class WardrobeSelector:
         if not candidates:
             return None
 
-        scored = []
+        # -------------------------
+        # EMBEDDING MATCH (PRIMARY)
+        # -------------------------
+        if reference_embedding:
+            best = self._best_by_embedding(candidates, reference_embedding)
+            if best:
+                return best
+
+        # -------------------------
+        # FALLBACK STRATEGY
+        # -------------------------
+        return self._fallback(candidates)
+
+    # =========================
+    # EMBEDDING MATCH
+    # =========================
+    def _best_by_embedding(
+        self,
+        candidates: List[Dict[str, Any]],
+        reference_embedding: List[float],
+    ) -> Optional[Dict[str, Any]]:
+
+        best_item = None
+        best_score = float("-inf")
 
         for item in candidates:
-            score = self._score_item(item, context, reference_embedding)
-            scored.append((item, score))
+            emb = item.get("embedding")
+            if not emb:
+                continue
 
-        scored.sort(key=lambda x: x[1], reverse=True)
-
-        return scored[0][0] if scored else None
-
-    # =========================
-    # SCORING ENGINE
-    # =========================
-    def _score_item(self, item, context, reference_embedding):
-
-        score = 0.0
-
-        # -------------------------
-        # 1. EMBEDDING SIMILARITY
-        # -------------------------
-        emb = item.get("embedding")
-
-        if reference_embedding and emb:
             try:
                 sim = qdrant_service.cosine_similarity(reference_embedding, emb)
-                score += sim * 2.0  # strong signal
+
+                if sim > best_score:
+                    best_score = sim
+                    best_item = item
+
             except Exception:
-                pass
+                continue
 
-        # -------------------------
-        # 2. MEMORY ALIGNMENT
-        # -------------------------
-        memory = context.get("user_memory", {}).get("memory_signals", {})
-
-        if emb:
-            score += self._memory_score(emb, memory)
-
-        # -------------------------
-        # 3. STYLE DNA ALIGNMENT
-        # -------------------------
-        dna = context.get("style_dna", {})
-
-        score += self._dna_score(item, dna)
-
-        # -------------------------
-        # 4. COLOR HARMONY
-        # -------------------------
-        score += self._color_score(item, context)
-
-        return score
+        return best_item
 
     # =========================
-    # MEMORY SCORING
+    # FALLBACK
     # =========================
-    def _memory_score(self, emb, memory):
+    def _fallback(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Safe fallback when:
+        - no embeddings available
+        - similarity fails
+        """
 
-        if not memory:
-            return 0
+        # prefer items with embeddings
+        for item in candidates:
+            if item.get("embedding"):
+                return item
 
-        score = 0
-
-        try:
-            liked = memory.get("liked_embeddings", [])
-            disliked = memory.get("disliked_embeddings", [])
-
-            if liked:
-                sim = max(
-                    [qdrant_service.cosine_similarity(emb, l) for l in liked if l],
-                    default=0
-                )
-                score += sim * 1.5
-
-            if disliked:
-                sim = max(
-                    [qdrant_service.cosine_similarity(emb, d) for d in disliked if d],
-                    default=0
-                )
-                score -= sim * 2.0
-
-        except Exception:
-            pass
-
-        return score
-
-    # =========================
-    # STYLE DNA SCORING
-    # =========================
-    def _dna_score(self, item, dna):
-
-        if not dna:
-            return 0
-
-        score = 0
-
-        preferred_styles = dna.get("preferred_styles", [])
-        preferred_colors = dna.get("preferred_colors", [])
-
-        style = str(item.get("style", "")).lower()
-        color = str(item.get("color", "")).lower()
-
-        if style in preferred_styles:
-            score += 0.8
-
-        if color in preferred_colors:
-            score += 0.6
-
-        return score
-
-    # =========================
-    # COLOR LOGIC
-    # =========================
-    def _color_score(self, item, context):
-
-        palette = context.get("palette", [])
-        color = str(item.get("color", "")).lower()
-
-        if not palette:
-            return 0
-
-        if color in palette:
-            return 0.7
-
-        if self._is_neutral(color):
-            return 0.4
-
-        return 0
-
-    def _is_neutral(self, color: str) -> bool:
-        return color in [
-            "black", "white", "grey", "gray",
-            "beige", "cream", "navy"
-        ]
+        # otherwise return first item
+        return candidates[0]
 
 
 # singleton

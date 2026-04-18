@@ -279,4 +279,4 @@ class Orchestrator:
 
 
 # Singleton
-orchestrator = Orchestrator()
+ahvi_orchestrator = Orchestrator()

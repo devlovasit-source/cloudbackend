@@ -1,3 +1,4 @@
+
 from typing import Any, Dict, List
 import random
 
@@ -5,22 +6,22 @@ from brain.engines.style_graph_engine import style_graph_engine
 from brain.engines.style_rules_engine import style_engine
 from brain.engines.styling.palette_engine import palette_engine
 from brain.engines.color_normalizer import color_normalizer
+from brain.engines.memory_scorer import memory_scorer
 
-from services.qdrant_service import qdrant_service
 from services.embedding_service import encode_metadata
-from services.image_embedding_service import encode_image_url
 
 
 class UnifiedStyleScorer:
     """
-    🔥 ELITE STYLE SCORER
+    🔥 FINAL ELITE STYLE SCORER
 
-    Adds:
-    - refinement awareness
-    - stronger style DNA influence
-    - memory signals fusion (explicit + embedding)
-    - wardrobe-aware bias
-    - stability controls
+    Responsibilities:
+    ✔ single scoring authority
+    ✔ integrates DNA, rules, palette
+    ✔ integrates memory via memory_scorer
+    ✔ session-aware
+    ✔ refinement-aware
+    ✔ stable + explainable
     """
 
     def score_outfit(
@@ -34,8 +35,8 @@ class UnifiedStyleScorer:
             return {"score": 0.0, "label": "Weak", "reasons": []}
 
         style_dna = context.get("style_dna", {}) or {}
-        memory = context.get("user_memory", {}) or {}
         refinement = context.get("refinement")
+        session = context.get("session", {}).get("derived", {})
 
         confidence = float(style_dna.get("confidence", 0.5))
         exploration_factor = max(0.0, 1.0 - confidence)
@@ -72,6 +73,7 @@ class UnifiedStyleScorer:
                     graph_score += style_graph_engine.pair_weight(graph, a_id, b_id)
 
         score += graph_score
+
         if graph_score > 1:
             reasons.append("items pair well together")
 
@@ -106,7 +108,7 @@ class UnifiedStyleScorer:
             reasons.append("clean aesthetic balance")
 
         # =========================
-        # 4. 🔥 STYLE DNA (STRONG)
+        # 4. STYLE DNA
         # =========================
         dna_score = self._dna_score(items, style_dna)
         score += dna_score * (0.5 + confidence)
@@ -115,25 +117,29 @@ class UnifiedStyleScorer:
             reasons.append("matches your style")
 
         # =========================
-        # 5. 🔥 MEMORY (EXPLICIT)
-        # =========================
-        memory_score = self._memory_signal_score(items, memory)
-        score += memory_score * 1.2
-
-        if memory_score > 0:
-            reasons.append("aligned with your past choices")
-
-        # =========================
-        # 6. 🔥 EMBEDDING MEMORY
+        # 5. MEMORY (🔥 CENTRALIZED)
         # =========================
         vector = self._build_outfit_embedding(items)
 
-        if vector and len(vector) > 100:
-            qdrant_score = self._qdrant_score(context.get("user_id"), vector)
-            score += qdrant_score * (0.4 + confidence)
+        if vector:
+            memory_score = memory_scorer.score(vector, context)
+            score += memory_score
+
+            if memory_score > 0:
+                reasons.append("aligned with your past choices")
 
         # =========================
-        # 7. 🔥 REFINEMENT BOOST
+        # 6. SESSION (🔥 PRIORITY)
+        # =========================
+        dominant = session.get("dominant_refinement")
+
+        if dominant:
+            session_score = 0.6
+            score += session_score
+            reasons.append(f"fits your current {dominant} preference")
+
+        # =========================
+        # 7. REFINEMENT BOOST
         # =========================
         if refinement:
             refine_score = self._refinement_score(items, refinement)
@@ -148,8 +154,10 @@ class UnifiedStyleScorer:
         score += self._exploration_boost(items, exploration_factor)
 
         # =========================
-        # FINAL LABEL
+        # FINAL NORMALIZATION
         # =========================
+        score = max(0, min(score, 10))
+
         label = self._label(score)
 
         return {
@@ -159,7 +167,7 @@ class UnifiedStyleScorer:
         }
 
     # =========================
-    # 🔥 DNA SCORING
+    # DNA
     # =========================
     def _dna_score(self, items, dna):
 
@@ -184,30 +192,7 @@ class UnifiedStyleScorer:
         return score
 
     # =========================
-    # 🔥 MEMORY SIGNAL SCORE
-    # =========================
-    def _memory_signal_score(self, items, memory):
-
-        signals = memory.get("memory_signals", {})
-        if not signals:
-            return 0
-
-        score = 0
-
-        for item in items:
-            style = str(item.get("style", "")).lower()
-            color = str(item.get("color", "")).lower()
-
-            if style in signals.get("preferred_styles", []):
-                score += 0.5
-
-            if color in signals.get("liked_colors", []):
-                score += 0.4
-
-        return score
-
-    # =========================
-    # 🔥 REFINEMENT SCORE
+    # REFINEMENT
     # =========================
     def _refinement_score(self, items, refinement):
 
@@ -238,42 +223,9 @@ class UnifiedStyleScorer:
         ])
 
         try:
-            text_vector = encode_metadata({"text": text}) or []
+            return encode_metadata({"text": text}) or []
         except Exception:
-            text_vector = []
-
-        return text_vector
-
-    # =========================
-    # QDRANT
-    # =========================
-    def _qdrant_score(self, user_id, vector):
-
-        if not user_id:
-            return 0
-
-        try:
-            liked = qdrant_service.search_user_memory(
-                user_id=user_id,
-                vector=vector,
-                memory_type="liked",
-                limit=3
-            )
-
-            disliked = qdrant_service.search_user_memory(
-                user_id=user_id,
-                vector=vector,
-                memory_type="disliked",
-                limit=3
-            )
-
-            like_score = sum(r.get("score", 0) for r in liked)
-            dislike_score = sum(r.get("score", 0) for r in disliked)
-
-            return (like_score * 1.2) - (dislike_score * 1.5)
-
-        except Exception:
-            return 0
+            return []
 
     # =========================
     # EXPLORATION

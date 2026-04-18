@@ -5,7 +5,7 @@ from typing import Dict, Any
 import requests
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
 
-from routers.remove_bg import remove_background_sync
+from routers.bg_remover import remove_background_sync
 
 
 class StyleBoardRenderer:

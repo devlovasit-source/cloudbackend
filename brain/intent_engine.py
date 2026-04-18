@@ -3,7 +3,7 @@ import json
 from typing import Dict, Any
 
 from services.ai_gateway import generate_text
-from backend.brain.nlu.intent_router import nlu_router
+from brain.nlu.intent_router import nlu_router
 
 
 # =========================

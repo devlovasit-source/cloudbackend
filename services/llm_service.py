@@ -46,7 +46,7 @@ def _call_ollama(payload, timeout=30):
             payload["options"] = {
                 "num_ctx": DEFAULT_NUM_CTX,
                 "num_predict": DEFAULT_NUM_PREDICT,
-                "temperature": 0.6,  # 🔥 lower hallucination
+                "temperature": 0.6,
             }
 
             res = session.post(f"{OLLAMA_URL}/generate", json=payload, timeout=timeout)
@@ -120,7 +120,65 @@ STRICT RULES:
 
 
 # =========================
-# 🔥 OUTFIT EXPLANATION (ELITE)
+# 🔥 FOLLOW-UP SUGGESTIONS
+# =========================
+def generate_followup_suggestions(context: dict) -> list:
+    """
+    🔥 Interactive UI chip suggestions
+    """
+
+    if not context:
+        return ["Show outfits", "Try something new"]
+
+    intent = context.get("intent", "general")
+    occasion = context.get("occasion")
+    aesthetic = context.get("aesthetic")
+
+    suggestions = []
+
+    if intent == "styling":
+        suggestions = [
+            "Make it sharper",
+            "Make it more casual",
+            "Change colors",
+            "Try another vibe"
+        ]
+
+        if occasion:
+            suggestions.append(f"More {occasion} appropriate")
+
+        if aesthetic:
+            suggestions.append(f"More {aesthetic}")
+
+    elif intent == "refinement":
+        suggestions = [
+            "Make it cleaner",
+            "Add layering",
+            "Switch footwear",
+            "Tone it down"
+        ]
+
+    elif intent == "explore_styles":
+        suggestions = [
+            "Show minimal styles",
+            "Show bold looks",
+            "Show streetwear",
+            "Try new aesthetics"
+        ]
+
+    else:
+        suggestions = [
+            "Show outfit ideas",
+            "Help me style this",
+            "Suggest something new",
+            "What works better?"
+        ]
+
+    return list(dict.fromkeys(suggestions))[:4]
+
+
+# =========================
+# 🔥 OUTFIT EXPLANATION
 # =========================
 def generate_outfit_explanation(outfits, context="", user_profile=None, signals=None):
 
@@ -161,7 +219,7 @@ Optional styling note:
 
 
 # =========================
-# 🔥 ITEM EXPLANATION (GROUNDING)
+# 🔥 ITEM EXPLANATION
 # =========================
 def generate_item_level_explanation(outfit, user_profile=None, signals=None):
 

@@ -11,7 +11,7 @@ from brain.orchestrator import ahvi_orchestrator
 from services.appwrite_proxy import AppwriteProxy
 from services.task_queue import enqueue_task
 from services.weather_service import get_hourly_weather
-from utils.response_validator import validate_orchestrator_response
+from brain.response_validator import validate_orchestrator_response
 
 try:
     from worker import run_heavy_audio_task

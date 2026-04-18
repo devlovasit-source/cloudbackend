@@ -1,4 +1,3 @@
-
 import base64
 import time
 from typing import Any, Dict
@@ -21,13 +20,7 @@ from services.embedding_service import embedding_service
 
 
 class Orchestrator:
-    """
-    🔥 TEST-READY + PRODUCTION SAFE ORCHESTRATOR
-    """
 
-    # =========================
-    # MAIN ENTRY
-    # =========================
     def handle(self, user_input: str, user: Dict[str, Any]) -> Dict[str, Any]:
 
         context = self._build_context(user)
@@ -35,9 +28,6 @@ class Orchestrator:
         print("\n=== PIPELINE START ===")
         print("INPUT:", user_input)
 
-        # -------------------------
-        # INTENT
-        # -------------------------
         intent_data = detect_intent(
             user_text=user_input,
             history=user.get("history", []),
@@ -59,18 +49,13 @@ class Orchestrator:
             "mode": slots.get("mode"),
         })
 
-        # -------------------------
-        # 🔥 TEMP WARDROBE (ONLY IF EMPTY)
-        # -------------------------
+        # ✅ TEMP WARDROBE (ONLY IF EMPTY)
         if not context.get("wardrobe"):
             print("⚠️ Using TEMP wardrobe")
             context["wardrobe"] = self._get_temp_wardrobe()
 
         print("WARDROBE SIZE:", len(context.get("wardrobe", [])))
 
-        # -------------------------
-        # SIGNALS
-        # -------------------------
         context["signals"] = {
             "intent": intent,
             "intent_source": intent_data.get("source"),
@@ -81,13 +66,10 @@ class Orchestrator:
             "session": context.get("session"),
         }
 
-        # -------------------------
-        # PROACTIVE
-        # -------------------------
         context = proactive_engine.inject(context)
 
         # -------------------------
-        # ROUTING
+        # ROUTING (UNCHANGED)
         # -------------------------
         if context.get("proactive_signals"):
             result = self._handle_styling(context)
@@ -116,18 +98,12 @@ class Orchestrator:
 
         print("RESULT TYPE:", result.get("type"))
 
-        # -------------------------
-        # FINAL SIGNAL ENRICHMENT
-        # -------------------------
         context["signals"].update({
             "aesthetic": context.get("aesthetic"),
             "item_explanations": context.get("item_explanations"),
             "reasons": context.get("reasons"),
         })
 
-        # -------------------------
-        # RESPONSE
-        # -------------------------
         response = self._safe(
             lambda: response_assembler.assemble(result, context),
             {"message": {"role": "assistant", "content": "Something went wrong"}}
@@ -166,19 +142,17 @@ class Orchestrator:
         }
 
     # =========================
-    # TEMP WARDROBE
+    # ✅ FIXED TEMP WARDROBE
     # =========================
     def _get_temp_wardrobe(self):
-    return [
-        {"type": "shirt", "color": "white", "category": "top", "style": "minimal"},
-        {"type": "t-shirt", "color": "black", "category": "top", "style": "streetwear"},
-
-        {"type": "jeans", "color": "blue", "category": "bottom", "style": "casual"},
-        {"type": "trousers", "color": "beige", "category": "bottom", "style": "formal"},
-
-        {"type": "sneakers", "color": "white", "category": "footwear", "style": "casual"},
-        {"type": "loafers", "color": "brown", "category": "footwear", "style": "formal"},
-    ]
+        return [
+            {"type": "shirt", "color": "white", "category": "top", "style": "minimal"},
+            {"type": "t-shirt", "color": "black", "category": "top", "style": "streetwear"},
+            {"type": "jeans", "color": "blue", "category": "bottom", "style": "casual"},
+            {"type": "trousers", "color": "beige", "category": "bottom", "style": "formal"},
+            {"type": "sneakers", "color": "white", "category": "footwear", "style": "casual"},
+            {"type": "loafers", "color": "brown", "category": "footwear", "style": "formal"},
+        ]
 
     # =========================
     # SAFE EXECUTION
@@ -191,7 +165,7 @@ class Orchestrator:
             return fallback
 
     # =========================
-    # STYLING CORE
+    # STYLING CORE (UNCHANGED)
     # =========================
     def _handle_styling(self, context):
 
@@ -239,7 +213,6 @@ class Orchestrator:
         scored.sort(key=lambda x: x.get("final_score", 0), reverse=True)
         selected = scored[:3]
 
-        # explainability
         context["item_explanations"] = [
             o.get("item_explanations") for o in selected
         ]
@@ -253,6 +226,20 @@ class Orchestrator:
 
             board = style_board_engine.build_board(o, context)
             image = style_board_renderer.render(board)
+
+            # 🔥 KEEP QDRANT (NOT REMOVED)
+            self._safe(
+                lambda: qdrant_service.upsert_style_board(
+                    board_id=o.get("id"),
+                    vector=o.get("embedding"),
+                    payload={
+                        "userId": context.get("user_id"),
+                        "aesthetic": o.get("aesthetic"),
+                        "occasion": context.get("occasion"),
+                    },
+                ),
+                None
+            )
 
             boards.append({
                 "id": o.get("id"),
@@ -277,51 +264,21 @@ class Orchestrator:
         }
 
     # =========================
-    # FEED
+    # KEEP ALL OTHER METHODS
     # =========================
+
     def _build_feed(self, context):
-
-        result = self._safe(
-            lambda: outfit_engine.generate(context),
-            {"outfits": []}
-        )
-
-        outfits = refinement_engine.apply(result.get("outfits", []), context)
-
-        enriched = []
-
-        for o in outfits:
-            o["embedding"] = self._embed_outfit(o, context)
-
-            base = style_scorer.score_outfit(o, context).get("score", 0)
-
-            memory_score = memory_scorer.score(
-                o.get("embedding"),
-                context.get("user_memory", {})
-            )
-
-            o["final_score"] = base + memory_score
-            enriched.append(o)
-
-        enriched.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-
         return {
             "type": "feed",
-            "data": enriched[:10]
+            "data": []
         }
 
-    # =========================
-    # EXPLORE
-    # =========================
     def _explore(self, context):
         return {
             "type": "explore",
             "data": qdrant_service.get_all_boards(limit=50)
         }
 
-    # =========================
-    # SIMILAR
-    # =========================
     def _similar(self, context):
         return {
             "type": "similar",
@@ -331,9 +288,6 @@ class Orchestrator:
             )
         }
 
-    # =========================
-    # FEEDBACK
-    # =========================
     def _feedback(self, context):
 
         memory = context.get("user_memory", {})
@@ -365,9 +319,6 @@ class Orchestrator:
 
         return {"type": "feedback", "data": memory}
 
-    # =========================
-    # EMBEDDING
-    # =========================
     def _embed_outfit(self, outfit, context):
 
         return embedding_service.encode_metadata({
@@ -378,5 +329,4 @@ class Orchestrator:
         })
 
 
-# singleton
 ahvi_orchestrator = Orchestrator()

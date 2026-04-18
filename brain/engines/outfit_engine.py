@@ -1,3 +1,4 @@
+
 from typing import Any, Dict, List
 import random
 import itertools
@@ -50,21 +51,26 @@ class OutfitEngine:
         candidates = self._generate_candidates(tops, bottoms, shoes, layers, accessories)
 
         # =========================
-        # SCORE
+        # SCORING BLOCK (FIXED)
         # =========================
         scored = []
 
         for items in candidates:
-            score = style_scorer.score_outfit(items, context, graph)
+            score_data = style_scorer.score_outfit(items, context, graph)
+
             scored.append({
                 "items": items,
-                "score": score
+                "score": score_data.get("score", 0),   # ✅ FIX (numeric)
+                "score_meta": score_data               # ✅ keep metadata
             })
 
+        # =========================
+        # SORTING
+        # =========================
         scored.sort(key=lambda x: x["score"], reverse=True)
 
         # =========================
-        # 🔥 DIVERSITY SELECTION
+        # DIVERSITY SELECTION
         # =========================
         diverse = self._select_diverse_outfits(scored)
 
@@ -101,7 +107,7 @@ class OutfitEngine:
         return candidates
 
     # =========================
-    # 🔥 DIVERSITY CORE
+    # DIVERSITY CORE
     # =========================
     def _select_diverse_outfits(self, scored: List[Dict[str, Any]]):
 
@@ -165,6 +171,7 @@ class OutfitEngine:
 
             items = outfit["items"]
             score = outfit["score"]
+            meta = outfit.get("score_meta", {})
 
             routes.append({
                 "type": route_type,
@@ -173,7 +180,11 @@ class OutfitEngine:
                     "items": items,
                     "score": round(score, 3),
                     "aesthetic": self._build_aesthetic(items, context, route_type),
-                    "description": self._build_description(route_type, context)
+                    "description": self._build_description(route_type, context),
+
+                    # ✅ ADD (non-breaking explainability)
+                    "label": meta.get("label"),
+                    "reasons": meta.get("reasons", [])
                 }
             })
 

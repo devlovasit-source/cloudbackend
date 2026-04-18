@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 import random
 import itertools
 
-from brain.engines.style_graph_engine import style_graph_engine
+from brain.style_graph_engine import style_graph_engine
 from brain.engines.style_rules_engine import style_engine
 from brain.engines.styling.palette_engine import palette_engine
 from brain.engines.unified_style_scorer import style_scorer

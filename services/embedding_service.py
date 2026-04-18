@@ -46,6 +46,7 @@ def build_text(data: dict) -> str:
     color_code = str(data.get("color_code") or "")
     pattern = str(data.get("pattern") or "")
     occasions_raw = data.get("occasions", [])
+
     if isinstance(occasions_raw, list):
         occasions = " ".join(str(x or "") for x in occasions_raw)
     else:
@@ -55,18 +56,45 @@ def build_text(data: dict) -> str:
 
 
 # -------------------------
-# MAIN FUNCTION
+# 🔥 NEW: GENERIC TEXT ENCODER
 # -------------------------
-def encode_metadata(data: dict) -> list:
+def encode_text(text: str) -> list:
     try:
+        if not text:
+            return []
+
         model = get_model()
-
-        text = build_text(data)
-
         embedding = model.encode(text)
 
         return embedding.tolist()
 
     except Exception as e:
-        print("Embedding error:", str(e))
+        print("Text embedding error:", str(e))
+        return []
+
+
+# -------------------------
+# EXISTING (KEEP)
+# -------------------------
+def encode_metadata(data: dict) -> list:
+    try:
+        text = build_text(data)
+        return encode_text(text)
+    except Exception as e:
+        print("Metadata embedding error:", str(e))
         return [0.0] * 384
+
+
+# -------------------------
+# 🔥 SERVICE WRAPPER (IMPORTANT)
+# -------------------------
+class EmbeddingService:
+    def encode_text(self, text: str) -> list:
+        return encode_text(text)
+
+    def encode_metadata(self, data: dict) -> list:
+        return encode_metadata(data)
+
+
+# ✅ singleton (CRITICAL)
+embedding_service = EmbeddingService()

@@ -1,6 +1,9 @@
+
 import base64
+import time
 from typing import Any, Dict, List
 
+from brain.intent_engine import detect_intent
 from brain.nlu.intent_router import nlu_router
 
 from brain.engines.outfit_engine import outfit_engine
@@ -20,10 +23,11 @@ from services.embedding_service import embedding_service
 
 class Orchestrator:
     """
-    🔥 ELITE ORCHESTRATOR
+    🔥 ELITE ORCHESTRATOR (FINAL FORM)
 
     Flow:
-    Intent → Context → Proactive → Outfit → Refinement → Scoring → Boards → Response
+    Input → Hybrid Intent → Context → Proactive → Outfit → Refinement
+          → Scoring → Boards → Signals → Response → Memory Update
     """
 
     # =========================
@@ -31,43 +35,74 @@ class Orchestrator:
     # =========================
     def handle(self, user_input: str, user: Dict[str, Any]) -> Dict[str, Any]:
 
-        intent_data = nlu_router.classify_intent(user_input)
+        context = self._build_context(user)
+
+        # -------------------------
+        # 🔥 HYBRID INTENT
+        # -------------------------
+        intent_data = detect_intent(
+            user_text=user_input,
+            history=user.get("history", []),
+            context=context
+        )
+
         intent = intent_data.get("intent")
         slots = intent_data.get("slots", {})
 
-        context = self._build_context(user, slots)
-        context["intent"] = intent
-        context["user_input"] = user_input
+        context.update({
+            "intent": intent,
+            "intent_meta": intent_data,
+            "slots": slots,
+            "user_input": user_input
+        })
 
-        # 🔥 PROACTIVE INTELLIGENCE
+        # -------------------------
+        # 🔥 PROACTIVE FIRST
+        # -------------------------
         context = proactive_engine.inject(context)
 
         # -------------------------
-        # MODES
+        # MODE ROUTING
         # -------------------------
         if slots.get("mode") == "feed":
-            return self._build_feed(context)
+            result = self._build_feed(context)
 
-        if slots.get("mode") == "explore":
-            return self._explore(context)
+        elif slots.get("mode") == "explore":
+            result = self._explore(context)
 
-        if slots.get("mode") == "similar":
-            return self._similar(context)
+        elif slots.get("mode") == "similar":
+            result = self._similar(context)
 
-        if slots.get("feedback"):
-            return self._feedback(context)
+        elif slots.get("feedback"):
+            result = self._feedback(context)
 
-        # -------------------------
-        # MAIN ROUTING
-        # -------------------------
-        if intent == "styling" or context.get("proactive_signals"):
+        elif context.get("proactive_signals"):
             result = self._handle_styling(context)
+
+        elif intent == "styling":
+            result = self._handle_styling(context)
+
         else:
             result = {
                 "type": "text",
                 "message": "Tell me what you need — styling, meals, or plans.",
                 "data": {}
             }
+
+        # -------------------------
+        # 🔥 SIGNAL LAYER (CRITICAL)
+        # -------------------------
+        context["signals"] = {
+            "intent": intent,
+            "intent_source": intent_data.get("source"),
+            "occasion": context.get("occasion"),
+            "weather": context.get("weather"),
+            "conversation_profile": context.get("conversation_profile"),
+            "user_memory": context.get("user_memory"),
+            "aesthetic": context.get("aesthetic"),
+            "item_explanations": context.get("item_explanations"),
+            "reasons": context.get("reasons"),
+        }
 
         # -------------------------
         # RESPONSE
@@ -79,29 +114,32 @@ class Orchestrator:
             "message": message,
             "data": result.get("data", {}),
             "meta": {
-                "type": result.get("type", "text")
+                "type": result.get("type", "text"),
+                "intent": intent,
+                "source": intent_data.get("source")
             }
         }
 
     # =========================
     # CONTEXT
     # =========================
-    def _build_context(self, user, slots):
+    def _build_context(self, user):
+
+        memory = user.get("memory", {}) or {}
 
         return {
             "user_id": user.get("user_id"),
             "wardrobe": user.get("wardrobe", []),
             "style_dna": user.get("style_dna", {}),
             "user_profile": user.get("profile", {}),
-            "user_memory": user.get("memory", {}),
-            "occasion": slots.get("occasion"),
-            "weather": slots.get("weather"),
+            "user_memory": memory,
+            "conversation_profile": memory.get("conversation_memory", {}),
+            "session": user.get("session", {}),
             "refinement": user.get("refinement"),
-            "slots": slots,
         }
 
     # =========================
-    # 🔥 STYLING CORE (ELITE)
+    # 🔥 STYLING CORE
     # =========================
     def _handle_styling(self, context):
 
@@ -109,71 +147,60 @@ class Orchestrator:
         outfits = result.get("outfits", [])
 
         if not outfits:
-            return {
-                "type": "styling",
-                "message": "I couldn't build outfits yet.",
-                "data": {}
-            }
+            return {"type": "styling", "message": "No outfits yet.", "data": {}}
 
-        # 🔥 APPLY REFINEMENT (REAL SWAPS)
         outfits = refinement_engine.apply(outfits, context)
 
-        scored_outfits = []
+        scored = []
 
         for o in outfits:
 
-            # -------------------------
-            # EMBEDDING
-            # -------------------------
             o["embedding"] = self._embed_outfit(o, context)
 
-            # -------------------------
-            # BASE SCORING
-            # -------------------------
-            score_data = style_scorer.score_outfit(o, context)
-            base_score = score_data.get("score", 0)
+            base = style_scorer.score_outfit(o, context)
+            base_score = base.get("score", 0)
 
-            # -------------------------
-            # 🔥 MEMORY PERSONALIZATION
-            # -------------------------
             memory_score = memory_scorer.score(
                 o.get("embedding"),
                 context.get("user_memory", {})
             )
 
-            final_score = base_score + memory_score
+            final = base_score + memory_score
 
-            o["final_score"] = final_score
-            o["memory_score"] = memory_score
-            o["label"] = score_data.get("label", "Look")
-            o["reasons"] = score_data.get("reasons", [])
+            o.update({
+                "final_score": final,
+                "memory_score": memory_score,
+                "label": base.get("label"),
+                "reasons": base.get("reasons", [])
+            })
 
-            scored_outfits.append(o)
+            scored.append(o)
 
-        # -------------------------
-        # SORT
-        # -------------------------
-        scored_outfits.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        scored.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        selected = scored[:3]
 
-        selected = scored_outfits[:3]
+        # 🔥 EXPLAINABILITY PIPELINE
+        context["item_explanations"] = [
+            o.get("item_explanations") for o in selected
+        ]
+        context["reasons"] = [
+            o.get("reasons") for o in selected
+        ]
 
         boards = []
 
-        for outfit in selected:
+        for o in selected:
 
-            board = style_board_engine.build_board(outfit, context)
+            board = style_board_engine.build_board(o, context)
             image = style_board_renderer.render(board)
 
-            embedding = outfit.get("embedding")
-
-            # 🔥 SAFE QDRANT UPSERT
             try:
                 qdrant_service.upsert_style_board(
-                    board_id=outfit.get("id"),
-                    vector=embedding,
+                    board_id=o.get("id"),
+                    vector=o.get("embedding"),
                     payload={
                         "userId": context.get("user_id"),
-                        "aesthetic": outfit.get("aesthetic"),
+                        "aesthetic": o.get("aesthetic"),
                         "occasion": context.get("occasion"),
                     },
                 )
@@ -181,15 +208,15 @@ class Orchestrator:
                 pass
 
             boards.append({
-                "id": outfit.get("id"),
+                "id": o.get("id"),
                 "image_base64": base64.b64encode(image).decode(),
-                "embedding": embedding,
-                "aesthetic": outfit.get("aesthetic"),
-                "description": outfit.get("description"),
-                "score": outfit.get("final_score"),
-                "label": outfit.get("label"),
-                "reasons": outfit.get("reasons"),
-                "refined": outfit.get("refined"),
+                "embedding": o.get("embedding"),
+                "aesthetic": o.get("aesthetic"),
+                "description": o.get("description"),
+                "score": o.get("final_score"),
+                "label": o.get("label"),
+                "reasons": o.get("reasons"),
+                "refined": o.get("refined"),
             })
 
         context["aesthetic"] = selected[0].get("aesthetic")
@@ -204,20 +231,16 @@ class Orchestrator:
         }
 
     # =========================
-    # FEED
+    # FEED / EXPLORE / SIMILAR
     # =========================
     def _build_feed(self, context):
-
         result = outfit_engine.generate(context)
-        outfits = result.get("outfits", [])
-
-        outfits = refinement_engine.apply(outfits, context)
+        outfits = refinement_engine.apply(result.get("outfits", []), context)
 
         enriched = []
 
         for o in outfits:
             o["embedding"] = self._embed_outfit(o, context)
-
             base = style_scorer.score_outfit(o, context).get("score", 0)
 
             memory_score = memory_scorer.score(
@@ -230,82 +253,48 @@ class Orchestrator:
 
         enriched.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
-        feed = []
-
-        for o in enriched[:10]:
-            board = style_board_engine.build_board(o, context)
-            image = style_board_renderer.render(board)
-
-            feed.append({
-                "id": o.get("id"),
-                "image_base64": base64.b64encode(image).decode(),
-                "embedding": o.get("embedding"),
-                "description": o.get("description"),
-                "score": o.get("final_score"),
-            })
-
         return {
             "type": "feed",
-            "data": feed
+            "data": enriched[:10]
         }
 
-    # =========================
-    # EXPLORE
-    # =========================
     def _explore(self, context):
-
         boards = qdrant_service.get_all_boards(limit=50)
+        return {"type": "explore", "data": boards}
 
-        user_vector = self._build_user_vector(
-            context.get("user_memory", {})
-        )
-
-        ranked = self._rank_boards(boards, user_vector)
-
-        return {
-            "type": "explore",
-            "data": ranked[:20]
-        }
-
-    # =========================
-    # SIMILAR
-    # =========================
     def _similar(self, context):
-
-        embedding = context.get("embedding")
-
-        results = qdrant_service.search_similar_boards(
-            embedding,
-            limit=15
-        )
-
         return {
             "type": "similar",
-            "data": results
+            "data": qdrant_service.search_similar_boards(
+                context.get("embedding"),
+                limit=15
+            )
         }
 
     # =========================
-    # FEEDBACK
+    # FEEDBACK (LEARNING)
     # =========================
     def _feedback(self, context):
 
-        signals = context.get("slots", {})
         memory = context.get("user_memory", {})
-
         embedding = context.get("embedding")
+        signals = context.get("slots", {})
 
         if signals.get("feedback") == "like" and embedding:
-            memory.setdefault("liked_embeddings", []).append(embedding)
+            memory.setdefault("liked_embeddings", []).append({
+                "value": embedding,
+                "ts": time.time()
+            })
 
         if signals.get("feedback") == "dislike" and embedding:
-            memory.setdefault("disliked_embeddings", []).append(embedding)
+            memory.setdefault("disliked_embeddings", []).append({
+                "value": embedding,
+                "ts": time.time()
+            })
 
         memory = archetype_learning_engine.update(memory, signals)
 
-        return {
-            "type": "feedback",
-            "data": memory
-        }
+        return {"type": "feedback", "data": memory}
 
     # =========================
     # EMBEDDING
@@ -319,31 +308,6 @@ class Orchestrator:
             "occasion": context.get("occasion"),
         })
 
-    # =========================
-    # RANKING HELPERS
-    # =========================
-    def _rank_boards(self, boards, user_vector):
 
-        if not user_vector:
-            return boards
-
-        def score(b):
-            emb = b.get("embedding")
-            if not emb:
-                return 0
-            return qdrant_service.cosine_similarity(user_vector, emb)
-
-        return sorted(boards, key=score, reverse=True)
-
-    def _build_user_vector(self, memory):
-
-        liked = memory.get("liked_embeddings", [])
-
-        if not liked:
-            return None
-
-        return [sum(x)/len(x) for x in zip(*liked)]
-
-
-# Singleton
+# singleton
 ahvi_orchestrator = Orchestrator()

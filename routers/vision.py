@@ -409,7 +409,84 @@ def _shape_vision_output(raw_data, color_hex: str, decoded_img, cv_image) -> dic
         "color_code": color_hex,
     }
 
+# =========================
+# 🔥 ELITE INTELLIGENCE LAYER
+# =========================
 
+def _build_items_from_single(final_data):
+    return [{
+        "type": final_data.get("sub_category", "item").lower(),
+        "color": final_data.get("color_code", "#000000"),
+        "style": "casual"
+    }]
+
+
+def _analyze_outfit_relationship(items):
+    types = [i["type"] for i in items]
+    colors = [i["color"] for i in items]
+
+    has_top = any(t in ["shirt", "t-shirt", "top"] for t in types)
+    has_bottom = any(t in ["pants", "jeans", "trousers"] for t in types)
+
+    completeness = "complete" if (has_top and has_bottom) else "partial"
+    harmony = "clean" if len(set(colors)) <= 2 else "busy"
+
+    styles = [i.get("style", "casual") for i in items]
+    consistency = "cohesive" if len(set(styles)) == 1 else "mixed"
+
+    return {
+        "completeness": completeness,
+        "color_harmony": harmony,
+        "style_consistency": consistency
+    }
+
+
+def _score_outfit(rel):
+    score = 70
+    if rel["completeness"] == "complete":
+        score += 10
+    if rel["color_harmony"] == "clean":
+        score += 10
+    if rel["style_consistency"] == "cohesive":
+        score += 10
+    return min(score, 100)
+
+
+def _generate_improvements(items, rel):
+    suggestions = []
+
+    if rel["completeness"] == "partial":
+        suggestions.append({
+            "type": "add_item",
+            "message": "Add a bottom to complete the outfit",
+            "action": "add_bottom"
+        })
+
+    if rel["color_harmony"] == "busy":
+        suggestions.append({
+            "type": "color_fix",
+            "message": "Too many colors — simplify palette",
+            "action": "simplify_colors"
+        })
+
+    if rel["style_consistency"] == "mixed":
+        suggestions.append({
+            "type": "style_fix",
+            "message": "Align styles for a cleaner look",
+            "action": "align_style"
+        })
+
+    return suggestions
+
+
+def _build_style_meta(item):
+    color = item.get("color_code", "#000000")
+    tone = "minimal" if color in ["#000000", "#FFFFFF", "#888888"] else "expressive"
+
+    return {
+        "tone": tone,
+        "versatility": "high" if item.get("pattern") == "plain" else "medium"
+    }
 @router.post("/analyze-image")
 def analyze_image(request: ImageAnalyzeRequest):
     try:
@@ -515,7 +592,18 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
 
     final_data = _shape_vision_output(final_data, extracted_color_hex, decoded, cv_image)
     final_data["userId"] = user_id
+    # =========================
+# 🔥 ELITE INTELLIGENCE
+# =========================
 
+items = _build_items_from_single(final_data)
+
+rel = _analyze_outfit_relationship(items)
+score = _score_outfit(rel)
+
+improvements = _generate_improvements(items, rel)
+style_meta = _build_style_meta(final_data)
+    
     image_duplicate = {"checked": False, "is_duplicate": False, "id": None, "score": 0.0}
     pixel_duplicate = {"checked": False, "is_duplicate": False, "id": None, "distance": None}
     vector = None
@@ -557,29 +645,36 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
         or top_similarity_score >= _duplicate_threshold()
     )
 
-    return {
-        "success": True,
-        "data": final_data,
-        "processed_image_base64": vision_input_base64,
-        "similar_items": similar_items,
-        "meta": {
-            "bg_removed": bg_removed,
-            "bg_fallback_reason": bg_fallback_reason,
-            "llm_fallback": llm_fallback,
-            "vision_model_used": model_used,
-            "similarity_enabled": _vision_enable_similarity(),
-            "embedding_created": vector is not None,
-            "similar_items_found": len(similar_items),
-            "image_duplicate_checked": bool(image_duplicate.get("checked")),
-            "image_duplicate_threshold": image_duplicate_threshold,
-            "image_duplicate_score": float(image_duplicate.get("score") or 0.0),
-            "pixel_duplicate_checked": bool(pixel_duplicate.get("checked")),
-            "pixel_duplicate_distance": pixel_duplicate.get("distance"),
-            "pixel_duplicate_max_distance": pixel_max_distance,
-            "pixel_hash": pixel_hash or None,
-            "probable_duplicate": probable_duplicate,
-        },
-    }
+return {
+    "success": True,
+    "data": final_data,
+    "items": items,
+    "outfit": {
+        "score": score,
+        "analysis": rel
+    },
+    "style": style_meta,
+    "improvements": improvements,
+    "processed_image_base64": vision_input_base64,
+    "similar_items": similar_items,
+    "meta": {
+        "bg_removed": bg_removed,
+        "bg_fallback_reason": bg_fallback_reason,
+        "llm_fallback": llm_fallback,
+        "vision_model_used": model_used,
+        "similarity_enabled": _vision_enable_similarity(),
+        "embedding_created": vector is not None,
+        "similar_items_found": len(similar_items),
+        "image_duplicate_checked": bool(image_duplicate.get("checked")),
+        "image_duplicate_threshold": image_duplicate_threshold,
+        "image_duplicate_score": float(image_duplicate.get("score") or 0.0),
+        "pixel_duplicate_checked": bool(pixel_duplicate.get("checked")),
+        "pixel_duplicate_distance": pixel_duplicate.get("distance"),
+        "pixel_duplicate_max_distance": pixel_max_distance,
+        "pixel_hash": pixel_hash or None,
+        "probable_duplicate": probable_duplicate,
+    },
+}
 
 
 @router.post("/analyze-image/async", status_code=status.HTTP_202_ACCEPTED)

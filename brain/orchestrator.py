@@ -11,7 +11,7 @@ from brain.engines.style_board_renderer import style_board_renderer
 
 from brain.tone.archetype_learning_engine import archetype_learning_engine
 
-from brain.response.assembler import response_assembler
+from brain.response.response_assembler import response_assembler
 from brain.tone.tone_engine import tone_engine
 
 from services.qdrant_service import qdrant_service

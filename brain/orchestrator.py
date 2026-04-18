@@ -1,10 +1,8 @@
-
 import base64
 import time
 from typing import Any, Dict, List
 
 from brain.intent_engine import detect_intent
-from brain.nlu.intent_router import nlu_router
 
 from brain.engines.outfit_engine import outfit_engine
 from brain.engines.style_scorer import style_scorer
@@ -23,11 +21,11 @@ from services.embedding_service import embedding_service
 
 class Orchestrator:
     """
-    🔥 ELITE ORCHESTRATOR (FINAL FORM)
+    🔥 FINAL ELITE ORCHESTRATOR
 
-    Flow:
-    Input → Hybrid Intent → Context → Proactive → Outfit → Refinement
-          → Scoring → Boards → Signals → Response → Memory Update
+    End-to-end intelligence pipeline:
+    Intent → Context → Signals → Proactive → Outfit → Refinement
+           → Scoring → Boards → Response → Memory Learning
     """
 
     # =========================
@@ -38,7 +36,7 @@ class Orchestrator:
         context = self._build_context(user)
 
         # -------------------------
-        # 🔥 HYBRID INTENT
+        # 1. HYBRID INTENT
         # -------------------------
         intent_data = detect_intent(
             user_text=user_input,
@@ -46,25 +44,47 @@ class Orchestrator:
             context=context
         )
 
-        intent = intent_data.get("intent")
+        intent = intent_data.get("intent", "general")
         slots = intent_data.get("slots", {})
 
+        # 🔥 enrich context immediately
         context.update({
             "intent": intent,
             "intent_meta": intent_data,
             "slots": slots,
-            "user_input": user_input
+            "user_input": user_input,
+            "occasion": slots.get("occasion"),
+            "weather": slots.get("weather"),
+            "mode": slots.get("mode"),
         })
 
         # -------------------------
-        # 🔥 PROACTIVE FIRST
+        # 2. 🔥 EARLY SIGNALS (CRITICAL)
+        # -------------------------
+        context["signals"] = {
+            "intent": intent,
+            "intent_source": intent_data.get("source"),
+            "predicted_intent": intent_data.get("predicted", {}).get("intent"),
+            "confidence": intent_data.get("confidence"),
+            "occasion": context.get("occasion"),
+            "weather": context.get("weather"),
+            "conversation_profile": context.get("conversation_profile"),
+            "user_memory": context.get("user_memory"),
+            "session": context.get("session"),
+        }
+
+        # -------------------------
+        # 3. PROACTIVE ENGINE
         # -------------------------
         context = proactive_engine.inject(context)
 
         # -------------------------
-        # MODE ROUTING
+        # 4. ROUTING (PRIORITY ORDER)
         # -------------------------
-        if slots.get("mode") == "feed":
+        if context.get("proactive_signals"):
+            result = self._handle_styling(context)
+
+        elif slots.get("mode") == "feed":
             result = self._build_feed(context)
 
         elif slots.get("mode") == "explore":
@@ -75,9 +95,6 @@ class Orchestrator:
 
         elif slots.get("feedback"):
             result = self._feedback(context)
-
-        elif context.get("proactive_signals"):
-            result = self._handle_styling(context)
 
         elif intent == "styling":
             result = self._handle_styling(context)
@@ -90,24 +107,21 @@ class Orchestrator:
             }
 
         # -------------------------
-        # 🔥 SIGNAL LAYER (CRITICAL)
+        # 5. FINAL SIGNAL ENRICHMENT
         # -------------------------
-        context["signals"] = {
-            "intent": intent,
-            "intent_source": intent_data.get("source"),
-            "occasion": context.get("occasion"),
-            "weather": context.get("weather"),
-            "conversation_profile": context.get("conversation_profile"),
-            "user_memory": context.get("user_memory"),
+        context["signals"].update({
             "aesthetic": context.get("aesthetic"),
             "item_explanations": context.get("item_explanations"),
             "reasons": context.get("reasons"),
-        }
+        })
 
         # -------------------------
-        # RESPONSE
+        # 6. RESPONSE
         # -------------------------
-        message = response_assembler.assemble(result, context)
+        message = self._safe(
+            lambda: response_assembler.assemble(result, context),
+            "Something went wrong, try again."
+        )
 
         return {
             "success": True,
@@ -116,12 +130,13 @@ class Orchestrator:
             "meta": {
                 "type": result.get("type", "text"),
                 "intent": intent,
-                "source": intent_data.get("source")
+                "source": intent_data.get("source"),
+                "confidence": intent_data.get("confidence")
             }
         }
 
     # =========================
-    # CONTEXT
+    # CONTEXT BUILDER
     # =========================
     def _build_context(self, user):
 
@@ -139,13 +154,25 @@ class Orchestrator:
         }
 
     # =========================
-    # 🔥 STYLING CORE
+    # SAFE EXECUTION
+    # =========================
+    def _safe(self, fn, fallback):
+        try:
+            return fn()
+        except Exception:
+            return fallback
+
+    # =========================
+    # STYLING CORE
     # =========================
     def _handle_styling(self, context):
 
-        result = outfit_engine.generate(context)
-        outfits = result.get("outfits", [])
+        result = self._safe(
+            lambda: outfit_engine.generate(context),
+            {"outfits": []}
+        )
 
+        outfits = result.get("outfits", [])
         if not outfits:
             return {"type": "styling", "message": "No outfits yet.", "data": {}}
 
@@ -179,7 +206,7 @@ class Orchestrator:
         scored.sort(key=lambda x: x.get("final_score", 0), reverse=True)
         selected = scored[:3]
 
-        # 🔥 EXPLAINABILITY PIPELINE
+        # 🔥 explainability
         context["item_explanations"] = [
             o.get("item_explanations") for o in selected
         ]
@@ -194,8 +221,9 @@ class Orchestrator:
             board = style_board_engine.build_board(o, context)
             image = style_board_renderer.render(board)
 
-            try:
-                qdrant_service.upsert_style_board(
+            # persist embeddings
+            self._safe(
+                lambda: qdrant_service.upsert_style_board(
                     board_id=o.get("id"),
                     vector=o.get("embedding"),
                     payload={
@@ -203,9 +231,9 @@ class Orchestrator:
                         "aesthetic": o.get("aesthetic"),
                         "occasion": context.get("occasion"),
                     },
-                )
-            except Exception:
-                pass
+                ),
+                None
+            )
 
             boards.append({
                 "id": o.get("id"),
@@ -231,16 +259,22 @@ class Orchestrator:
         }
 
     # =========================
-    # FEED / EXPLORE / SIMILAR
+    # FEED
     # =========================
     def _build_feed(self, context):
-        result = outfit_engine.generate(context)
+
+        result = self._safe(
+            lambda: outfit_engine.generate(context),
+            {"outfits": []}
+        )
+
         outfits = refinement_engine.apply(result.get("outfits", []), context)
 
         enriched = []
 
         for o in outfits:
             o["embedding"] = self._embed_outfit(o, context)
+
             base = style_scorer.score_outfit(o, context).get("score", 0)
 
             memory_score = memory_scorer.score(
@@ -258,10 +292,18 @@ class Orchestrator:
             "data": enriched[:10]
         }
 
+    # =========================
+    # EXPLORE
+    # =========================
     def _explore(self, context):
-        boards = qdrant_service.get_all_boards(limit=50)
-        return {"type": "explore", "data": boards}
+        return {
+            "type": "explore",
+            "data": qdrant_service.get_all_boards(limit=50)
+        }
 
+    # =========================
+    # SIMILAR
+    # =========================
     def _similar(self, context):
         return {
             "type": "similar",
@@ -293,6 +335,16 @@ class Orchestrator:
             })
 
         memory = archetype_learning_engine.update(memory, signals)
+
+        # 🔥 persist memory
+        self._safe(
+            lambda: qdrant_service.upsert_user_profile(
+                user_id=context.get("user_id"),
+                vector=embedding,
+                payload={"memory": memory}
+            ),
+            None
+        )
 
         return {"type": "feedback", "data": memory}
 

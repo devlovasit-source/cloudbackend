@@ -7,6 +7,9 @@ from brain.engines.outfit_engine import outfit_engine
 from brain.engines.style_scorer import style_scorer
 from brain.engines.style_board_engine import style_board_engine
 from brain.engines.style_board_renderer import style_board_renderer
+from brain.engines.refinement_engine import refinement_engine
+from brain.engines.memory_scorer import memory_scorer
+from brain.engines.proactive_engine import proactive_engine
 
 from brain.tone.archetype_learning_engine import archetype_learning_engine
 from brain.response.response_assembler import response_assembler
@@ -17,10 +20,10 @@ from services.embedding_service import embedding_service
 
 class Orchestrator:
     """
-    🔥 CLEAN PRODUCTION ORCHESTRATOR
+    🔥 ELITE ORCHESTRATOR
 
     Flow:
-    Intent → Context → Outfit → Scoring → Boards → Response Assembly → Contract
+    Intent → Context → Proactive → Outfit → Refinement → Scoring → Boards → Response
     """
 
     # =========================
@@ -34,6 +37,10 @@ class Orchestrator:
 
         context = self._build_context(user, slots)
         context["intent"] = intent
+        context["user_input"] = user_input
+
+        # 🔥 PROACTIVE INTELLIGENCE
+        context = proactive_engine.inject(context)
 
         # -------------------------
         # MODES
@@ -53,7 +60,7 @@ class Orchestrator:
         # -------------------------
         # MAIN ROUTING
         # -------------------------
-        if intent == "styling":
+        if intent == "styling" or context.get("proactive_signals"):
             result = self._handle_styling(context)
         else:
             result = {
@@ -63,13 +70,10 @@ class Orchestrator:
             }
 
         # -------------------------
-        # 🔥 RESPONSE ASSEMBLY (STRING)
+        # RESPONSE
         # -------------------------
         message = response_assembler.assemble(result, context)
 
-        # -------------------------
-        # 🔥 FINAL CONTRACT (VERY IMPORTANT)
-        # -------------------------
         return {
             "success": True,
             "message": message,
@@ -92,11 +96,12 @@ class Orchestrator:
             "user_memory": user.get("memory", {}),
             "occasion": slots.get("occasion"),
             "weather": slots.get("weather"),
+            "refinement": user.get("refinement"),
             "slots": slots,
         }
 
     # =========================
-    # 🔥 STYLING CORE
+    # 🔥 STYLING CORE (ELITE)
     # =========================
     def _handle_styling(self, context):
 
@@ -110,40 +115,70 @@ class Orchestrator:
                 "data": {}
             }
 
+        # 🔥 APPLY REFINEMENT (REAL SWAPS)
+        outfits = refinement_engine.apply(outfits, context)
+
         scored_outfits = []
 
         for o in outfits:
+
+            # -------------------------
+            # EMBEDDING
+            # -------------------------
             o["embedding"] = self._embed_outfit(o, context)
 
+            # -------------------------
+            # BASE SCORING
+            # -------------------------
             score_data = style_scorer.score_outfit(o, context)
+            base_score = score_data.get("score", 0)
 
-            o["final_score"] = score_data.get("score", 0)
+            # -------------------------
+            # 🔥 MEMORY PERSONALIZATION
+            # -------------------------
+            memory_score = memory_scorer.score(
+                o.get("embedding"),
+                context.get("user_memory", {})
+            )
+
+            final_score = base_score + memory_score
+
+            o["final_score"] = final_score
+            o["memory_score"] = memory_score
             o["label"] = score_data.get("label", "Look")
             o["reasons"] = score_data.get("reasons", [])
 
             scored_outfits.append(o)
 
-        scored_outfits.sort(key=lambda x: x["final_score"], reverse=True)
+        # -------------------------
+        # SORT
+        # -------------------------
+        scored_outfits.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
         selected = scored_outfits[:3]
 
         boards = []
 
         for outfit in selected:
+
             board = style_board_engine.build_board(outfit, context)
             image = style_board_renderer.render(board)
 
             embedding = outfit.get("embedding")
 
-            qdrant_service.upsert_style_board(
-                board_id=outfit.get("id"),
-                vector=embedding,
-                payload={
-                    "userId": context.get("user_id"),
-                    "aesthetic": outfit.get("aesthetic"),
-                    "occasion": context.get("occasion"),
-                },
-            )
+            # 🔥 SAFE QDRANT UPSERT
+            try:
+                qdrant_service.upsert_style_board(
+                    board_id=outfit.get("id"),
+                    vector=embedding,
+                    payload={
+                        "userId": context.get("user_id"),
+                        "aesthetic": outfit.get("aesthetic"),
+                        "occasion": context.get("occasion"),
+                    },
+                )
+            except Exception:
+                pass
 
             boards.append({
                 "id": outfit.get("id"),
@@ -154,6 +189,7 @@ class Orchestrator:
                 "score": outfit.get("final_score"),
                 "label": outfit.get("label"),
                 "reasons": outfit.get("reasons"),
+                "refined": outfit.get("refined"),
             })
 
         context["aesthetic"] = selected[0].get("aesthetic")
@@ -175,15 +211,24 @@ class Orchestrator:
         result = outfit_engine.generate(context)
         outfits = result.get("outfits", [])
 
+        outfits = refinement_engine.apply(outfits, context)
+
         enriched = []
 
         for o in outfits:
             o["embedding"] = self._embed_outfit(o, context)
-            score_data = style_scorer.score_outfit(o, context)
-            o["final_score"] = score_data.get("score", 0)
+
+            base = style_scorer.score_outfit(o, context).get("score", 0)
+
+            memory_score = memory_scorer.score(
+                o.get("embedding"),
+                context.get("user_memory", {})
+            )
+
+            o["final_score"] = base + memory_score
             enriched.append(o)
 
-        enriched.sort(key=lambda x: x["final_score"], reverse=True)
+        enriched.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
         feed = []
 

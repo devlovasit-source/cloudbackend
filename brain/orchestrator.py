@@ -186,7 +186,7 @@ class Orchestrator:
 
             o["embedding"] = self._embed_outfit(o, context)
 
-            base = style_scorer.score_outfit(o, context)
+            base = style_scorer.score_outfit(o, context, graph)
             base_score = base.get("score", 0)
 
             memory_score = memory_scorer.score(

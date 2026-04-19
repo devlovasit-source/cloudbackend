@@ -14,6 +14,7 @@ class QdrantService:
         self.url = os.getenv("QDRANT_URL")
         self.api_key = os.getenv("QDRANT_API_KEY")
 
+        # 🔥 LOCKED COLLECTIONS
         self.collection = os.getenv("QDRANT_COLLECTION", "wardrobe")
         self.memory_collection = os.getenv("QDRANT_MEMORY_COLLECTION", "outfit_memory")
         self.image_collection = os.getenv("QDRANT_IMAGE_COLLECTION", "wardrobe_image")
@@ -29,7 +30,7 @@ class QdrantService:
             try:
                 self.client = QdrantClient(url=self.url, api_key=self.api_key)
             except Exception as e:
-                print("Qdrant init failed:", str(e))
+                print("❌ Qdrant init failed:", str(e))
 
     # =========================
     # INIT
@@ -39,6 +40,7 @@ class QdrantService:
             return
 
         print("Initializing Qdrant...")
+
         self._create_collection(self.collection, self.vector_size)
         self._create_collection(self.memory_collection, self.memory_vector_size)
         self._create_collection(self.image_collection, self.image_vector_size)
@@ -54,8 +56,10 @@ class QdrantService:
                     collection_name=name,
                     vectors_config=VectorParams(size=size, distance=Distance.COSINE),
                 )
+                print(f"✅ Created collection: {name}")
+
         except Exception as e:
-            print("Collection init error:", str(e))
+            print("❌ Collection init error:", str(e))
 
     def _ensure(self):
         if not self.client:
@@ -65,21 +69,61 @@ class QdrantService:
         return True
 
     # =========================
-    # UPSERT
+    # 🔥 MAIN UPSERT (GENERIC)
     # =========================
     def upsert_item(self, item_id, vector, payload):
         if not self._ensure():
             return
 
         try:
+            if not payload.get("userId"):
+                print("⚠️ Missing userId in payload")
+
             self.client.upsert(
                 collection_name=self.collection,
-                points=[PointStruct(id=item_id, vector=vector, payload=payload)],
+                points=[
+                    PointStruct(
+                        id=item_id,
+                        vector=vector,
+                        payload=payload
+                    )
+                ],
+            )
+
+            print("✅ QDRANT UPSERT:", item_id)
+
+        except Exception as e:
+            print("❌ Upsert item failed:", str(e))
+
+    # =========================
+    # 🔥 WARDROBE HELPER (NEW)
+    # =========================
+    def upsert_wardrobe_item(self, item: dict):
+        """
+        Backward compatible helper
+        Allows both styles:
+        - upsert_item(...)
+        - upsert_wardrobe_item({...})
+        """
+
+        try:
+            self.upsert_item(
+                item_id=item["id"],
+                vector=item.get("embedding", [0.0] * self.vector_size),
+                payload={
+                    "userId": item.get("userId"),
+                    "type": item.get("type"),
+                    "category": item.get("category"),
+                    "color": item.get("color"),
+                    "image_url": item.get("image_url"),
+                }
             )
         except Exception as e:
-            print("Upsert item failed:", str(e))
+            print("❌ Wardrobe upsert failed:", str(e))
 
-    # 🔥 STYLE BOARD UPSERT
+    # =========================
+    # STYLE BOARD UPSERT
+    # =========================
     def upsert_style_board(self, board_id, vector, payload):
         if not self._ensure():
             return
@@ -95,8 +139,9 @@ class QdrantService:
                     )
                 ],
             )
+
         except Exception as e:
-            print("Board upsert failed:", str(e))
+            print("❌ Board upsert failed:", str(e))
 
     # =========================
     # SEARCH
@@ -123,10 +168,12 @@ class QdrantService:
             ]
 
         except Exception as e:
-            print("Search failed:", str(e))
+            print("❌ Search failed:", str(e))
             return []
 
-    # 🔥 BOARD SIMILARITY (NO USER FILTER)
+    # =========================
+    # BOARD SEARCH
+    # =========================
     def search_similar_boards(self, vector, limit=10):
         if not self._ensure():
             return []
@@ -149,11 +196,11 @@ class QdrantService:
             ]
 
         except Exception as e:
-            print("Board search failed:", str(e))
+            print("❌ Board search failed:", str(e))
             return []
 
     # =========================
-    # EXPLORE FEED
+    # SCROLL ALL BOARDS
     # =========================
     def get_all_boards(self, limit=100):
         if not self._ensure():
@@ -180,7 +227,7 @@ class QdrantService:
             ]
 
         except Exception as e:
-            print("Fetch boards failed:", str(e))
+            print("❌ Fetch boards failed:", str(e))
             return []
 
     # =========================
@@ -197,7 +244,7 @@ class QdrantService:
                 points=[item_id],
             )
         except Exception as e:
-            print("Feedback update failed:", str(e))
+            print("❌ Feedback update failed:", str(e))
 
     # =========================
     # MEMORY VECTOR
@@ -212,7 +259,7 @@ class QdrantService:
                 points=[PointStruct(id=point_id, vector=vector, payload=payload)],
             )
         except Exception as e:
-            print("Memory upsert failed:", str(e))
+            print("❌ Memory upsert failed:", str(e))
 
     # =========================
     # IMAGE VECTOR
@@ -227,10 +274,10 @@ class QdrantService:
                 points=[PointStruct(id=point_id, vector=vector, payload=payload)],
             )
         except Exception as e:
-            print("Image upsert failed:", str(e))
+            print("❌ Image upsert failed:", str(e))
 
     # =========================
-    # COSINE SIMILARITY (🔥 CORE)
+    # COSINE SIMILARITY
     # =========================
     @staticmethod
     def cosine_similarity(vec1, vec2):

@@ -1,25 +1,46 @@
+
 from typing import List, Dict, Any, Optional
 from services.qdrant_service import qdrant_service
 
 
 class WardrobeSelector:
     """
-    🔥 CLEAN WARDROBE SELECTOR (FINAL)
+    🔥 ELITE WARDROBE SELECTOR
 
-    Responsibility:
-    - Select best matching item from user's wardrobe
+    Responsibilities:
+    ✔ Smart item selection
+    ✔ Embedding + heuristic scoring
+    ✔ Robust fallback
 
-    DOES:
-    ✔ filter by type
-    ✔ embedding similarity (primary signal)
-    ✔ safe fallback
-
-    DOES NOT:
-    ❌ memory scoring
-    ❌ style DNA scoring
-    ❌ palette scoring
-    ❌ refinement scoring
+    Guarantees:
+    ✔ Always returns best possible item
+    ✔ Never crashes on missing embeddings
     """
+
+    # =========================
+    # TYPE NORMALIZATION
+    # =========================
+    TYPE_MAP = {
+        "tshirt": "top",
+        "shirt": "top",
+        "tee": "top",
+        "top": "top",
+
+        "jeans": "bottom",
+        "pants": "bottom",
+        "trousers": "bottom",
+        "bottom": "bottom",
+
+        "shoes": "footwear",
+        "sneakers": "footwear",
+        "footwear": "footwear",
+    }
+
+    def normalize_type(self, t: str) -> str:
+        if not t:
+            return ""
+        t = t.lower().strip()
+        return self.TYPE_MAP.get(t, t)
 
     # =========================
     # MAIN API
@@ -33,80 +54,80 @@ class WardrobeSelector:
 
         wardrobe = context.get("wardrobe", [])
         if not wardrobe:
+            print("⚠️ No wardrobe available")
             return None
 
-        target_type = str(target_type or "").lower().strip()
+        target_type = self.normalize_type(target_type)
 
         # -------------------------
-        # FILTER BY TYPE
+        # FILTER BY TYPE (SMART)
         # -------------------------
         candidates = [
             w for w in wardrobe
-            if target_type in str(w.get("type", "")).lower()
+            if target_type in self.normalize_type(str(w.get("type", "")))
+               or target_type in self.normalize_type(str(w.get("category", "")))
         ]
 
         if not candidates:
+            print(f"⚠️ No candidates for type: {target_type}")
             return None
 
         # -------------------------
-        # EMBEDDING MATCH (PRIMARY)
+        # SCORING
         # -------------------------
-        if reference_embedding:
-            best = self._best_by_embedding(candidates, reference_embedding)
-            if best:
-                return best
-
-        # -------------------------
-        # FALLBACK STRATEGY
-        # -------------------------
-        return self._fallback(candidates)
-
-    # =========================
-    # EMBEDDING MATCH
-    # =========================
-    def _best_by_embedding(
-        self,
-        candidates: List[Dict[str, Any]],
-        reference_embedding: List[float],
-    ) -> Optional[Dict[str, Any]]:
-
-        best_item = None
-        best_score = float("-inf")
+        scored = []
 
         for item in candidates:
-            emb = item.get("embedding")
-            if not emb:
-                continue
+            score = 0.0
 
-            try:
-                sim = qdrant_service.cosine_similarity(reference_embedding, emb)
+            # 🔥 EMBEDDING SCORE (PRIMARY)
+            if reference_embedding and item.get("embedding"):
+                try:
+                    sim = qdrant_service.cosine_similarity(
+                        reference_embedding,
+                        item["embedding"]
+                    )
+                    score += sim * 0.8
+                except Exception:
+                    pass
 
-                if sim > best_score:
-                    best_score = sim
-                    best_item = item
+            # 🔥 HEURISTIC BOOST
+            if target_type in str(item.get("type", "")).lower():
+                score += 0.2
 
-            except Exception:
-                continue
+            # slight preference for items with embeddings
+            if item.get("embedding"):
+                score += 0.05
 
-        return best_item
+            scored.append({
+                "item": item,
+                "score": score
+            })
+
+        # -------------------------
+        # SORT
+        # -------------------------
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        best = scored[0]["item"]
+
+        print(f"SELECTED ITEM → type: {target_type} | score: {scored[0]['score']:.3f}")
+
+        return best
 
     # =========================
-    # FALLBACK
+    # FALLBACK (SAFE)
     # =========================
-    def _fallback(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Safe fallback when:
-        - no embeddings available
-        - similarity fails
-        """
+    def fallback(self, wardrobe: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not wardrobe:
+            return None
 
         # prefer items with embeddings
-        for item in candidates:
+        for item in wardrobe:
             if item.get("embedding"):
                 return item
 
-        # otherwise return first item
-        return candidates[0]
+        return wardrobe[0]
 
 
 # singleton

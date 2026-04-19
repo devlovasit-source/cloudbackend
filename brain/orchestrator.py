@@ -11,6 +11,7 @@ from brain.engines.style_board_renderer import style_board_renderer
 from brain.engines.refinement_engine import refinement_engine
 from brain.engines.memory_scorer import memory_scorer
 from brain.engines.proactive_engine import proactive_engine
+from brain.engines.style_graph_engine import style_graph_engine
 
 from brain.tone.archetype_learning_engine import archetype_learning_engine
 from brain.response.response_assembler import response_assembler
@@ -179,7 +180,22 @@ class Orchestrator:
             return {"type": "styling", "data": {}}
 
         outfits = refinement_engine.apply(outfits, context)
+        # =========================
+        # BUILD GRAPH FOR SCORING
+        # =========================
+        graph = None
 
+        try:
+            wardrobe = context.get("wardrobe", [])
+        
+            graph = style_graph_engine.build_graph({
+                "tops": [i for i in wardrobe if i.get("category") in ["top", "tops"]],
+                "bottoms": [i for i in wardrobe if i.get("category") in ["bottom", "bottoms"]],
+                "shoes": [i for i in wardrobe if i.get("category") in ["footwear", "shoes"]],
+            })
+        
+        except Exception as e:
+            print("GRAPH BUILD ERROR:", e)
         scored = []
 
         for o in outfits:

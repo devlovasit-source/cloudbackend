@@ -5,6 +5,8 @@ import requests
 from typing import List, Dict, Any
 
 from services.r2_storage import R2Storage
+from services.qdrant_service import qdrant_service
+from services.embedding_service import embedding_service
 
 
 # =========================
@@ -40,11 +42,11 @@ def _decode_base64(value: str) -> bytes:
         return b""
 
 
-def _create_document(data: Dict[str, Any]) -> Dict[str, Any]:
+def _create_document(document_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{APPWRITE_ENDPOINT}/databases/{APPWRITE_DATABASE_ID}/collections/{APPWRITE_COLLECTION_ID}/documents"
 
     payload = {
-        "documentId": str(uuid.uuid4()),
+        "documentId": document_id,  # ✅ SAME ID
         "data": data,
     }
 
@@ -57,6 +59,25 @@ def _create_document(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =========================
+# CATEGORY NORMALIZATION
+# =========================
+CATEGORY_MAP = {
+    "tops": "top",
+    "top": "top",
+    "bottoms": "bottom",
+    "bottom": "bottom",
+    "footwear": "footwear",
+    "shoes": "footwear",
+}
+
+
+def normalize_category(cat: str) -> str:
+    if not cat:
+        return "top"
+    return CATEGORY_MAP.get(cat.lower(), "top")
+
+
+# =========================
 # MAIN FUNCTION
 # =========================
 def persist_selected_items(
@@ -65,10 +86,10 @@ def persist_selected_items(
     detected_items: List[Dict[str, Any]],
 ):
     """
-    Full pipeline:
-    - Decode base64 images
+    FINAL PIPELINE:
     - Upload to R2
-    - Store metadata in Appwrite
+    - Save to Appwrite
+    - Save to Qdrant
     """
 
     saved_items = []
@@ -78,6 +99,11 @@ def persist_selected_items(
             continue
 
         try:
+            # =========================
+            # 🔥 USE SAME ID EVERYWHERE
+            # =========================
+            file_id = item.get("item_id") or str(uuid.uuid4())
+
             # -------------------------
             # 1. Decode images
             # -------------------------
@@ -89,10 +115,8 @@ def persist_selected_items(
                 continue
 
             # -------------------------
-            # 2. Upload to R2 (CORRECT)
+            # 2. Upload to R2
             # -------------------------
-            file_id = str(uuid.uuid4())
-
             upload_result = r2.upload_wardrobe_images(
                 file_id=file_id,
                 raw_image_bytes=raw_bytes,
@@ -102,43 +126,74 @@ def persist_selected_items(
             raw_url = upload_result.get("raw_image_url", "")
             mask_url = upload_result.get("masked_image_url", "")
 
-            raw_id = upload_result.get("raw_file_name", file_id)
-            mask_id = upload_result.get("masked_file_name", file_id)
-
             if not raw_url or not mask_url:
-                print("⚠️ R2 upload failed, skipping item")
+                print("⚠️ R2 upload failed")
                 continue
 
             # -------------------------
-            # 3. Prepare Appwrite doc
+            # 3. Normalize fields
+            # -------------------------
+            category = normalize_category(item.get("category"))
+            item_type = str(item.get("sub_category", "")).lower()
+            color = item.get("color_code", "#000000")
+
+            # -------------------------
+            # 4. Build embedding
+            # -------------------------
+            embedding = embedding_service.encode_text(
+                f"{color} {item_type} {category}"
+            )
+
+            # -------------------------
+            # 5. Appwrite document
             # -------------------------
             doc = {
-                # REQUIRED
                 "userId": user_id,
                 "status": "active",
 
                 "image_url": raw_url,
                 "masked_url": mask_url,
 
-                "image_id": raw_id,
-                "masked_id": mask_id,
+                "image_id": file_id,
+                "masked_id": file_id,
 
-                "qdrant_point_id": str(uuid.uuid4()),
+                "qdrant_point_id": file_id,
 
-                # METADATA
                 "name": item.get("name", "Item"),
-                "category": item.get("category", "Tops"),
-                "sub_category": item.get("sub_category", "item"),
-                "color_code": item.get("color_code", "#000000"),
+                "category": category,
+                "sub_category": item_type,
+                "color_code": color,
                 "pattern": item.get("pattern", "plain"),
                 "occasions": item.get("occasions", []),
 
-                # USAGE
                 "worn": 0,
                 "liked": False,
             }
 
-            created = _create_document(doc)
+            created = _create_document(file_id, doc)
+
+            # -------------------------
+            # 🔥 6. SAVE TO QDRANT (CRITICAL)
+            # -------------------------
+            try:
+                qdrant_service.upsert_wardrobe_item({
+                    "id": file_id,
+                    "userId": user_id,
+
+                    "type": item_type,
+                    "category": category,
+                    "color": color,
+
+                    "image_url": mask_url,
+
+                    "embedding": embedding,
+                })
+
+                print("✅ QDRANT SAVED")
+
+            except Exception as e:
+                print("❌ QDRANT ERROR:", str(e))
+
             saved_items.append(created)
 
         except Exception as e:

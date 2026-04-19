@@ -1,4 +1,3 @@
-
 import base64
 import time
 from typing import Any, Dict
@@ -156,7 +155,6 @@ class Orchestrator:
 
     def _handle_styling(self, context):
 
-        # ✅ FIXED ENGINE CALL
         result = self._safe(
             lambda: outfit_engine.generate(
                 context.get("wardrobe", []),
@@ -165,7 +163,6 @@ class Orchestrator:
             {"routes": []}
         )
 
-        # ✅ ROUTES → OUTFITS
         routes = result.get("routes", [])
 
         outfits = []
@@ -224,8 +221,14 @@ class Orchestrator:
 
         for o in selected:
 
-            board = style_board_engine.build_board(o, context)
-            image = style_board_renderer.render(board)
+            board = None
+            image = None
+
+            try:
+                board = style_board_engine.build_board(o, context)
+                image = style_board_renderer.render(board)
+            except Exception as e:
+                print("BOARD/RENDER ERROR:", e)
 
             self._safe(
                 lambda: qdrant_service.upsert_style_board(
@@ -242,7 +245,7 @@ class Orchestrator:
 
             boards.append({
                 "id": o.get("id"),
-                "image_base64": base64.b64encode(image).decode(),
+                "image_base64": base64.b64encode(image).decode() if image else None,
                 "embedding": o.get("embedding"),
                 "aesthetic": o.get("aesthetic"),
                 "description": o.get("description"),

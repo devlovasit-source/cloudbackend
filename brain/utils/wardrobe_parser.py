@@ -1,52 +1,99 @@
 # utils/wardrobe_parser.py
-import re
 
-def extract_and_clean_response(llama_text: str, wardrobe: list) -> dict:
+import re
+from typing import List, Dict, Any
+
+
+def extract_and_clean_response(llama_text: str, wardrobe: List[Dict[str, Any]]) -> dict:
     """
-    Parses CHIPS, PACK_LIST, and STYLE_BOARD from the LLM response.
-    Relies on style_engine.py for strict outfit validation.
+    Elite parser:
+    - Extracts CHIPS, PACK_LIST, STYLE_BOARD
+    - Validates STYLE_BOARD IDs against wardrobe
+    - Cleans hallucinated IDs from text
+    - Returns UI-ready structure
     """
+
     response_data = {
-        "cleaned_text": llama_text,
+        "cleaned_text": llama_text or "",
         "chips": [],
         "pack_tag": "",
-        "board_tag": ""
+        "board_tag": "",
+        "board_ids": []  # 🔥 NEW (important for UI)
     }
 
-    # 1. Parse Chips
-    chip_match = re.search(r'\[CHIPS?:(.*?)\]', response_data["cleaned_text"], re.IGNORECASE)
+    text = response_data["cleaned_text"]
+
+    # =========================
+    # 1. CHIPS
+    # =========================
+    chip_match = re.search(r'\[CHIPS?:\s*(.*?)\]', text, re.IGNORECASE)
     if chip_match:
-        response_data["chips"] = [c.strip() for c in chip_match.group(1).split(',') if c.strip()]
-    response_data["cleaned_text"] = re.sub(r'\[CHIPS?:.*?\]', '', response_data["cleaned_text"], flags=re.IGNORECASE).strip()
+        chips = chip_match.group(1)
+        response_data["chips"] = [
+            c.strip() for c in chips.split(",") if c.strip()
+        ]
 
-    # 2. Extract Packing List
-    pack_match = re.search(r'\[?PACK_LIST:\s*(.*?)(?:\]|\n|$)', response_data["cleaned_text"], re.IGNORECASE)
+    text = re.sub(r'\[CHIPS?:.*?\]', '', text, flags=re.IGNORECASE)
+
+    # =========================
+    # 2. PACK LIST
+    # =========================
+    pack_match = re.search(r'\[?PACK_LIST:\s*(.*?)(?:\]|\n|$)', text, re.IGNORECASE)
     if pack_match:
-        # Just extract exactly what the backend provided
-        raw_pack_str = pack_match.group(1).strip()
-        response_data["pack_tag"] = f"[PACK_LIST: {raw_pack_str}]"
-        response_data["cleaned_text"] = re.sub(r'\[?PACK_LIST:.*?(\]|\n|$)', '', response_data["cleaned_text"], flags=re.IGNORECASE).strip()
+        raw_pack = pack_match.group(1).strip()
+        if raw_pack:
+            response_data["pack_tag"] = f"[PACK_LIST: {raw_pack}]"
 
-    # 3. Extract Style Board 
-    board_match = re.search(r'\[?STYLE_BOARD:\s*(.*?)(?:\]|\n|$)', response_data["cleaned_text"], re.IGNORECASE)
+    text = re.sub(r'\[?PACK_LIST:.*?(\]|\n|$)', '', text, flags=re.IGNORECASE)
+
+    # =========================
+    # 3. STYLE BOARD
+    # =========================
+    board_match = re.search(r'\[?STYLE_BOARD:\s*(.*?)(?:\]|\n|$)', text, re.IGNORECASE)
+
     if board_match:
-        # The Style Engine already guarantees this string contains perfectly validated IDs.
-        # We just need to extract the string and strip it from the text.
-        raw_items_str = board_match.group(1).strip()
-        
-        if raw_items_str:
-            response_data["board_tag"] = f"[STYLE_BOARD: {raw_items_str}]"
-            
-        response_data["cleaned_text"] = re.sub(r'\[?STYLE_BOARD:.*?(\]|\n|$)', '', response_data["cleaned_text"], flags=re.IGNORECASE).strip()
+        raw_items = board_match.group(1).strip()
 
-    # 4. Final Text Cleanup (Removing stray IDs and artifacts)
+        if raw_items:
+            # split ids
+            ids = [i.strip() for i in raw_items.split(",") if i.strip()]
+
+            # 🔥 VALIDATE AGAINST WARDROBE
+            valid_ids = []
+            wardrobe_ids = {
+                str(item.get("$id") or item.get("id"))
+                for item in wardrobe
+            }
+
+            for i in ids:
+                if i in wardrobe_ids:
+                    valid_ids.append(i)
+
+            if valid_ids:
+                response_data["board_ids"] = valid_ids
+                response_data["board_tag"] = f"[STYLE_BOARD: {', '.join(valid_ids)}]"
+
+    text = re.sub(r'\[?STYLE_BOARD:.*?(\]|\n|$)', '', text, flags=re.IGNORECASE)
+
+    # =========================
+    # 4. CLEAN TEXT (IMPORTANT)
+    # =========================
+
+    # remove wardrobe ids
     for item in wardrobe:
         item_id = str(item.get("$id") or item.get("id", ""))
-        if item_id and item_id in response_data["cleaned_text"]:
-            response_data["cleaned_text"] = response_data["cleaned_text"].replace(item_id, "")
-    
-    response_data["cleaned_text"] = re.sub(r'\b(item|items|id1|id2|id3|id4)\b', '', response_data["cleaned_text"], flags=re.IGNORECASE)
-    response_data["cleaned_text"] = re.sub(r'\(\s*[,\s]*\)', '', response_data["cleaned_text"]) 
-    response_data["cleaned_text"] = re.sub(r'\s{2,}', ' ', response_data["cleaned_text"]).strip() 
+        if item_id:
+            text = text.replace(item_id, "")
+
+    # remove generic junk tokens
+    text = re.sub(r'\b(id\d+|item\d+|items?|ids?)\b', '', text, flags=re.IGNORECASE)
+
+    # remove empty brackets / artifacts
+    text = re.sub(r'\(\s*[,\s]*\)', '', text)
+
+    # normalize spaces
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+
+    response_data["cleaned_text"] = text
 
     return response_data

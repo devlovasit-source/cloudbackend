@@ -78,6 +78,7 @@ boards_router = _load_optional_router("routers.boards")
 feedback_router = _load_optional_router("routers.feedback")
 ops_router = _load_optional_router("routers.ops")
 calendar_router = _load_optional_router("routers.calendar")
+notifications_router = _load_optional_router("routers.notifications")
 
 # AI
 ai_router = _load_optional_router("api.ai")
@@ -464,6 +465,9 @@ if ops_router:
 
 if calendar_router:
     app.include_router(calendar_router, prefix="/api")
+
+if notifications_router:
+    app.include_router(notifications_router)
 
 if stylist_router:
     app.include_router(stylist_router, prefix="/api/stylist")

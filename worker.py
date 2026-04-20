@@ -205,3 +205,49 @@ def calendar_daily_task(self, payload: dict, user_id: str = "", request_id: str 
         _retry_or_fail(self, e, request_id=request_id)
 
 
+@celery_app.task(name="dispatch_due_reminders_task", bind=True)
+def dispatch_due_reminders_task(self, window_seconds: int = 60, request_id: str = ""):
+    """
+    Dispatches due reminders via Firebase push.
+    Designed to be triggered by a cron hitting /api/notifications/dispatch-due/async.
+    """
+    from services.firebase_push_service import firebase_push_service
+    from services.notification_store import notification_store
+
+    _mark_started(self, request_id=request_id, user_id="system")
+    try:
+        due = notification_store.list_due_reminders(window_seconds=int(window_seconds))
+        processed = 0
+        sent = 0
+        failed = 0
+
+        for rem in due:
+            processed += 1
+            doc_id = str(rem.get("$id") or rem.get("id") or "")
+            user_id = str(rem.get("userId") or "")
+            message = str(rem.get("message") or "")
+            title = "AHVI"
+
+            devices = notification_store.list_devices(user_id=user_id)
+            tokens = [str(d.get("token") or "").strip() for d in devices if str(d.get("token") or "").strip()]
+            resp = firebase_push_service.send_to_tokens(tokens=tokens, title=title, body=message, data={"type": "reminder"})
+            if resp.get("success") and int(resp.get("sent") or 0) > 0:
+                sent += int(resp.get("sent") or 0)
+                if doc_id:
+                    notification_store.mark_reminder(reminder_doc_id=doc_id, status="sent")
+            else:
+                failed += int(resp.get("failed") or 1)
+                if doc_id:
+                    notification_store.mark_reminder(reminder_doc_id=doc_id, status="failed", error=str(resp.get("error") or ""))
+
+        _mark_succeeded(
+            self,
+            {"task": "dispatch_due_reminders_task", "processed": processed, "sent": sent, "failed": failed},
+            request_id=request_id,
+        )
+        return {"status": "success", "processed": processed, "sent": sent, "failed": failed}
+    except Exception as e:
+        logger.exception("NOTIFICATIONS DISPATCH ERROR")
+        _retry_or_fail(self, e, request_id=request_id)
+
+

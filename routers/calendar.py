@@ -1,100 +1,90 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
 import traceback
+from datetime import datetime, timezone
 
-from brain.archive.calendar_engine import calendar_engine
-from brain.utils.calendar_formatter import build_calendar_checklist_bundle
-from middleware.auth_middleware import get_current_user  # 🔥 NEW
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
-router = APIRouter()
+from middleware.auth_middleware import get_current_user
+from models.calendar_models import CalendarEventInput, CalendarRuntimeResult
+from brain.engines.calendar_runtime import run_calendar_runtime
+from services.task_queue import enqueue_task
 
+try:
+    from worker import calendar_runtime_task
+except Exception:
+    calendar_runtime_task = None
 
-# =========================
-# REQUEST MODELS
-# =========================
-class CalendarEventRequest(BaseModel):
-    text: str = Field(..., min_length=2, description="User event text")
-
-
-class DailyBriefRequest(BaseModel):
-    date: str
+router = APIRouter(prefix="/calendar", tags=["calendar"])
 
 
-# =========================
-# EVENT PROCESSING
-# =========================
-@router.post("/calendar/process")
-def process_event(
-    req: CalendarEventRequest,
-    user=Depends(get_current_user)  # 🔥 USER CONTEXT
-):
+class CalendarTextRequest(BaseModel):
+    text: str = Field(..., min_length=2, description="User event text/title")
+    startAtISO: str | None = None
+    endAtISO: str | None = None
+    timezone: str | None = None
+    dressCode: str | None = None
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _text_to_event(req: CalendarTextRequest) -> CalendarEventInput:
+    # Keep it stable: if UI only provides text, treat it as a titled event starting "now".
+    start_iso = str(req.startAtISO or _iso_now())
+    return CalendarEventInput(
+        eventId="text_event",
+        title=req.text,
+        startAtISO=start_iso,
+        endAtISO=req.endAtISO,
+        timezone=req.timezone,
+        dressCode=req.dressCode,
+    )
+
+
+@router.post("/runtime", response_model=CalendarRuntimeResult)
+def runtime_event(req: CalendarEventInput, user=Depends(get_current_user)):
     try:
-        user_id = user["user_id"]
+        user_id = str((user or {}).get("user_id") or "")
+        return run_calendar_runtime(req, user_id=user_id)
+    except Exception:
+        print("❌ /calendar/runtime error:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Calendar runtime failed")
 
-        # 🧠 Step 1: engine with user context (important upgrade)
-        result = calendar_engine.process_event(req.text, user_id=user["user_id"])
 
-        # 🧩 Step 2: UI formatter
-        checklist_bundle = build_calendar_checklist_bundle(
-            result.get("classification", {}),
-            {
-                "packing": result.get("packing", []),
-                "prep_tasks": result.get("prep_tasks", []),
-                "outfit": result.get("outfit", {})
-            }
-        )
-
-        return {
-            "success": True,
-            "meta": {
-                "user_id": user_id
-            },
-            "data": {
-                **result,
-                "checklist_bundle": checklist_bundle
-            }
-        }
-
+@router.post("/process", response_model=CalendarRuntimeResult)
+def process_text(req: CalendarTextRequest, user=Depends(get_current_user)):
+    try:
+        user_id = str((user or {}).get("user_id") or "")
+        event = _text_to_event(req)
+        return run_calendar_runtime(event, user_id=user_id)
     except Exception:
         print("❌ /calendar/process error:\n", traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail="Calendar processing failed"
-        )
+        raise HTTPException(status_code=500, detail="Calendar processing failed")
 
 
-# =========================
-# QUICK CLASSIFICATION ONLY
-# =========================
-@router.post("/calendar/classify")
-def classify_event(
-    req: CalendarEventRequest,
-    user=Depends(get_current_user)  # 🔥 protect endpoint
-):
-    try:
-        result = calendar_engine.classify_event(req.text)
+@router.post("/process/async", status_code=status.HTTP_202_ACCEPTED)
+def process_text_async(http_request: Request, req: CalendarTextRequest, user=Depends(get_current_user)):
+    if calendar_runtime_task is None:
+        raise HTTPException(status_code=503, detail="Worker not configured")
 
-        return {
-            "success": True,
-            "data": result
-        }
-
-    except Exception:
-        print("❌ /calendar/classify error:\n", traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail="Classification failed"
-        )
+    user_id = str((user or {}).get("user_id") or "")
+    event = _text_to_event(req)
+    task_id = enqueue_task(
+        task_func=calendar_runtime_task,
+        args=[event.model_dump(), user_id],
+        kwargs={"request_id": str(getattr(http_request.state, "request_id", "") or "")},
+        kind="calendar_runtime",
+        user_id=user_id,
+        source="routers.calendar.process_text_async",
+        request_id=str(getattr(http_request.state, "request_id", "") or ""),
+    )
+    return {"success": True, "status": "queued", "task_id": task_id}
 
 
-# =========================
-# HEALTH CHECK
-# =========================
-@router.get("/calendar/health")
+@router.get("/health")
 def calendar_health():
-    return {
-        "status": "ok",
-        "engine": "calendar_engine_v3",
-        "auth": "enabled",  # 🔥 added clarity
-        "ready": True
-    }
+    return {"status": "ok", "engine": "calendar_runtime_v1", "auth": "enabled", "ready": True}
+

@@ -154,4 +154,27 @@ def bg_remove_task(self, image_base64: str, request_id: str = ""):
         _retry_or_fail(self, e, request_id=request_id)
 
 
+@celery_app.task(name="calendar_runtime_task", bind=True)
+def calendar_runtime_task(self, event: dict, user_id: str = "", request_id: str = ""):
+    """
+    Runs calendar intelligence off the main request thread.
+    Payload is a CalendarEventInput-like dict.
+    """
+    from models.calendar_models import CalendarEventInput
+    from brain.engines.calendar_runtime import run_calendar_runtime
+
+    _mark_started(self, request_id=request_id, user_id=user_id)
+    try:
+        parsed = CalendarEventInput.model_validate(event or {})
+        result = run_calendar_runtime(parsed, user_id=user_id)
+        _mark_succeeded(
+            self,
+            {"task": "calendar_runtime_task", "request_id": request_id},
+            request_id=request_id,
+        )
+        return {"status": "success", "result": result.model_dump()}
+    except Exception as e:
+        logger.exception("CALENDAR TASK ERROR")
+        _retry_or_fail(self, e, request_id=request_id)
+
 

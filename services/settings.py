@@ -15,6 +15,14 @@ def _env_csv(name: str, default: str) -> list[str]:
     return [item for item in parts if item]
 
 
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = str(os.getenv(name, "")).strip()
+        if value:
+            return value
+    return str(default or "").strip()
+
+
 class AppSettings(BaseModel):
     rate_limit_enabled: bool = Field(default=True)
     rate_limit_window_seconds: int = Field(default=60)
@@ -59,7 +67,14 @@ class AppSettings(BaseModel):
             upload_max_bytes=int(os.getenv("UPLOAD_MAX_BYTES", str(20 * 1024 * 1024))),
             auth_cache_ttl_seconds=int(os.getenv("AUTH_CACHE_TTL_SECONDS", "30")),
             auth_required=_env_bool("AUTH_REQUIRED", True),
-            redis_url=str(os.getenv("REDIS_URL", "redis://localhost:6379/0")),
+            redis_url=_env_first(
+                "REDIS_URL",
+                "REDIS_PRIVATE_URL",
+                "REDIS_TLS_URL",
+                "UPSTASH_REDIS_URL",
+                "RAILWAY_REDIS_URL",
+                default="redis://localhost:6379/0",
+            ),
             cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS", "*"),
             cors_allow_credentials=_env_bool("CORS_ALLOW_CREDENTIALS", False),
             cors_allowed_methods=_env_csv("CORS_ALLOWED_METHODS", "*"),

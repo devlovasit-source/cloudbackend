@@ -676,8 +676,8 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
     final_data = _shape_vision_output(final_data, extracted_color_hex, decoded, cv_image)
     final_data["userId"] = user_id
     # =========================
-# 🔥 ELITE INTELLIGENCE
-# =========================
+    # ELITE INTELLIGENCE
+    # =========================
 
     items = _build_items_from_single(final_data)
     rel = _analyze_outfit_relationship(items)

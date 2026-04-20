@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover
     redis = None
 
 from services.appwrite_proxy import AppwriteProxy
+from services.settings import settings
 
 logger = logging.getLogger("ahvi.job_tracker")
 
@@ -46,7 +47,8 @@ class JobTracker:
         if redis is None:
             return None
         try:
-            url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+            # Keep Redis config consistent with the rest of the app (Railway/Upstash env var variants).
+            url = str(settings.redis_url or "redis://localhost:6379/0")
             self._redis = redis.Redis.from_url(url, decode_responses=True)
             self._redis.ping()
             return self._redis

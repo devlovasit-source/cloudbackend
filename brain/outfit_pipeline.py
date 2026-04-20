@@ -129,6 +129,8 @@ def _normalize_item(item: Dict[str, Any], fallback_type: str) -> Dict[str, Any]:
         "name": str(item.get("name") or item_type.title()),
         "type": item_type,
         "color": str(item.get("color") or item.get("color_name") or "").lower(),
+        "image_url": str(item.get("image_url") or item.get("raw_image_url") or item.get("raw_url") or "").strip(),
+        "masked_url": str(item.get("masked_url") or item.get("masked_image_url") or item.get("sticker_url") or "").strip(),
         "fabric": str(item.get("fabric") or "").lower(),
         "style": str(item.get("style") or item.get("vibe") or "").lower(),
         "occasion_tags": [str(v).lower() for v in item.get("occasion_tags", item.get("occasions", [])) if v],

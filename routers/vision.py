@@ -2,6 +2,7 @@ import base64
 import os
 import time
 import hashlib
+import uuid
 import requests
 from collections import Counter
 
@@ -18,6 +19,7 @@ from services.image_fingerprint import compute_pixel_hash_from_base64
 from services.qdrant_service import qdrant_service
 from services.task_queue import enqueue_task
 from brain.engines.color_normalizer import color_normalizer
+from services.wardrobe_persistence_service import persist_selected_items
 
 try:
     from worker import vision_analyze_task
@@ -85,6 +87,7 @@ def _vision_max_image_bytes() -> int:
 class ImageAnalyzeRequest(BaseModel):
     image_base64: str = Field(..., min_length=20)
     userId: str = "demo_user"
+    auto_save: bool = False
 
 
 # =========================
@@ -98,6 +101,19 @@ def _normalize_base64_for_model(value: str) -> str:
 def _to_png_data_uri(base64_text: str) -> str:
     text = _normalize_base64_for_model(base64_text)
     return f"data:image/png;base64,{text}"
+
+
+def _ensure_png_base64(image_base64: str) -> str:
+    b64 = _normalize_base64_for_model(image_base64)
+    img_data = base64.b64decode(b64, validate=True)
+    np_arr = np.frombuffer(img_data, np.uint8)
+    decoded = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+    if decoded is None:
+        raise HTTPException(status_code=400, detail="unable to decode image for PNG conversion")
+    ok, encoded = cv2.imencode(".png", decoded)
+    if not ok:
+        raise HTTPException(status_code=500, detail="unable to encode PNG")
+    return base64.b64encode(encoded.tobytes()).decode()
 
 
 def _decode_and_validate_image(image_base64: str, max_bytes: int):
@@ -124,6 +140,47 @@ def _decode_and_validate_image(image_base64: str, max_bytes: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image payload: {str(e)}")
+
+
+def _persist_vision_result(
+    *,
+    user_id: str,
+    original_image_base64: str,
+    vision_payload: dict,
+) -> dict:
+    if not isinstance(vision_payload, dict):
+        raise HTTPException(status_code=500, detail="invalid vision payload for persistence")
+
+    data = vision_payload.get("data") if isinstance(vision_payload.get("data"), dict) else {}
+    meta = vision_payload.get("meta") if isinstance(vision_payload.get("meta"), dict) else {}
+    processed = str(vision_payload.get("processed_image_base64") or "").strip()
+    if not processed:
+        raise HTTPException(status_code=502, detail="missing processed image for persistence")
+
+    if not bool(meta.get("bg_removed")):
+        raise HTTPException(status_code=409, detail="background not removed; cannot save masked image")
+
+    raw_png_b64 = _ensure_png_base64(original_image_base64)
+    masked_png_b64 = _ensure_png_base64(processed)
+
+    item_id = str(uuid.uuid4())
+    detected_item = {
+        "item_id": item_id,
+        "name": data.get("name") or "Item",
+        "category": data.get("category") or "Tops",
+        "sub_category": data.get("sub_category") or "item",
+        "color_code": data.get("color_code") or "#000000",
+        "pattern": data.get("pattern") or "plain",
+        "occasions": data.get("occasions") or [],
+        "raw_crop_base64": raw_png_b64,
+        "segmented_png_base64": masked_png_b64,
+    }
+
+    return persist_selected_items(
+        user_id=str(user_id or "demo_user"),
+        selected_item_ids=[item_id],
+        detected_items=[detected_item],
+    )
 
 
 def _input_has_alpha(image_base64: str) -> bool:
@@ -562,7 +619,32 @@ def _build_visual_intelligence(final_data, items, rel, style_meta):
 @router.post("/analyze-image")
 def analyze_image(request: ImageAnalyzeRequest):
     try:
-        return vision_analyze_core(request.image_base64, request.userId)
+        payload = vision_analyze_core(request.image_base64, request.userId)
+        if request.auto_save:
+            try:
+                save_result = _persist_vision_result(
+                    user_id=request.userId,
+                    original_image_base64=request.image_base64,
+                    vision_payload=payload,
+                )
+                payload["save"] = {
+                    "enabled": True,
+                    "success": True,
+                    "result": save_result,
+                }
+            except HTTPException as exc:
+                payload["save"] = {
+                    "enabled": True,
+                    "success": False,
+                    "error": {"status_code": exc.status_code, "detail": str(exc.detail)},
+                }
+            except Exception as exc:
+                payload["save"] = {
+                    "enabled": True,
+                    "success": False,
+                    "error": {"status_code": 500, "detail": str(exc)},
+                }
+        return payload
     except HTTPException:
         raise
     except Exception as exc:

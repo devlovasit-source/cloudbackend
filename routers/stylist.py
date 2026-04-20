@@ -11,6 +11,7 @@ from brain.engines.style_board_engine import style_board_engine
 from brain.engines.style_board_renderer import style_board_renderer
 from services import ai_gateway
 from services.appwrite_proxy import AppwriteProxy
+from services.r2_storage import R2Storage, R2StorageError
 
 router = APIRouter()
 
@@ -57,6 +58,8 @@ class OutfitPipelineRequest(BaseModel):
     wardrobe: Any = None
     user_profile: Dict[str, Any] = Field(default_factory=dict)
     context: Dict[str, Any] = Field(default_factory=dict)
+    include_base64: bool = True
+    upload_style_boards_to_r2: bool = False
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -87,20 +90,44 @@ def _visual_intelligence_from_outfit(outfit: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _render_style_boards(cards: List[Dict[str, Any]], context: Dict[str, Any], style_dna: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _render_style_boards(
+    cards: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    style_dna: Dict[str, Any],
+    *,
+    user_id: str,
+    include_base64: bool,
+    upload_style_boards_to_r2: bool,
+) -> List[Dict[str, Any]]:
     rendered_boards: List[Dict[str, Any]] = []
+    storage = None
+    if upload_style_boards_to_r2:
+        try:
+            storage = R2Storage()
+        except Exception:
+            storage = None
     for idx, card in enumerate(cards):
         items = card.get("items", []) if isinstance(card, dict) else []
         if not items:
             continue
 
         board = style_board_engine.build_board({"items": items, "score": card.get("score")}, context)
+        image_bytes = b""
         try:
             image_bytes = style_board_renderer.render(board)
-            image_base64 = base64.b64encode(image_bytes).decode()
         except Exception as exc:
             print(f"[renderer] error={exc}")
-            image_base64 = None
+            image_bytes = b""
+
+        image_base64 = base64.b64encode(image_bytes).decode() if (include_base64 and image_bytes) else None
+        image_url = None
+        upload_error = None
+        if storage and image_bytes:
+            try:
+                uploaded = storage.upload_style_board_image(user_id=str(user_id or "user"), image_bytes=image_bytes, extension="png")
+                image_url = uploaded.get("image_url")
+            except (R2StorageError, Exception) as exc:
+                upload_error = str(exc)
 
         rendered_boards.append(
             {
@@ -112,6 +139,8 @@ def _render_style_boards(cards: List[Dict[str, Any]], context: Dict[str, Any], s
                 "vibe": board.get("vibe"),
                 "items": items,
                 "image_base64": image_base64,
+                "image_url": image_url,
+                "upload_error": upload_error,
                 "board_payload": {
                     "items": items,
                     "aesthetic": board.get("aesthetic"),
@@ -182,7 +211,14 @@ def run_outfit_pipeline(request: OutfitPipelineRequest):
                 },
             }
 
-        rendered_boards = _render_style_boards(cards, context, style_dna)
+        rendered_boards = _render_style_boards(
+            cards,
+            context,
+            style_dna,
+            user_id=request.user_id,
+            include_base64=bool(request.include_base64),
+            upload_style_boards_to_r2=bool(request.upload_style_boards_to_r2),
+        )
         visual_intelligence = _visual_intelligence_from_outfit(_dict(outfits[0])) if outfits else {}
 
         return {

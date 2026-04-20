@@ -1,5 +1,6 @@
 import io
 import base64
+import os
 from typing import Dict, Any
 
 import requests
@@ -183,27 +184,62 @@ class StyleBoardRenderer:
     # IMAGE LOADING
     # =========================
     def _load_image(self, item):
-
-        url = item.get("image_url")
+        # Prefer pre-masked/sticker assets from R2 whenever available.
+        masked_url = (
+            item.get("masked_url")
+            or item.get("masked_image_url")
+            or item.get("sticker_url")
+            or item.get("cutout_url")
+        )
+        url = masked_url or item.get("image_url")
+        if not url and item.get("image_base64"):
+            try:
+                text = str(item.get("image_base64") or "").strip()
+                if "," in text:
+                    text = text.split(",", 1)[1]
+                base = Image.open(io.BytesIO(base64.b64decode(text))).convert("RGBA")
+                return base
+            except Exception:
+                return None
         if not url:
             return None
 
         try:
             res = requests.get(url, timeout=5)
+            if not res.ok:
+                return None
+            base = Image.open(io.BytesIO(res.content)).convert("RGBA")
+
+            # If this is already a masked/sticker image (or has alpha transparency), don't re-run BG removal.
+            if masked_url or self._has_transparency(base):
+                return base
+
+            # Optional fallback only for raw images.
+            # Keep this disabled by default to avoid re-segmenting already clean assets.
+            if str(os.getenv("STYLE_BOARD_APPLY_BG_REMOVAL", "false")).lower() not in {"1", "true", "yes"}:
+                return base
+
             b64 = base64.b64encode(res.content).decode()
-
             result = remove_background_sync(b64)
-
             clean = (
-                result["image_base64"].split(",")[-1]
+                str(result.get("image_base64") or "").split(",")[-1]
                 if result.get("success") and result.get("bg_removed")
                 else b64
             )
-
             return Image.open(io.BytesIO(base64.b64decode(clean))).convert("RGBA")
 
         except Exception:
             return None
+
+    def _has_transparency(self, image: Image.Image) -> bool:
+        try:
+            if image.mode != "RGBA":
+                return False
+            alpha = image.getchannel("A")
+            lo, hi = alpha.getextrema()
+            return int(lo) < 255
+        except Exception:
+            return False
 
     # =========================
     # SHADOW

@@ -9,6 +9,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_csv(name: str, default: str) -> list[str]:
+    raw = str(os.getenv(name, default))
+    parts = [item.strip() for item in raw.split(",")]
+    return [item for item in parts if item]
+
+
 class AppSettings(BaseModel):
     rate_limit_enabled: bool = Field(default=True)
     rate_limit_window_seconds: int = Field(default=60)
@@ -18,8 +24,14 @@ class AppSettings(BaseModel):
     try_on_daily_limit: int = Field(default=2)
     upload_max_bytes: int = Field(default=5 * 1024 * 1024)
     auth_cache_ttl_seconds: int = Field(default=30)
-    auth_required: bool = Field(default=False)
+    auth_required: bool = Field(default=True)
     redis_url: str = Field(default="redis://localhost:6379/0")
+    cors_allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
+    cors_allow_credentials: bool = Field(default=False)
+    cors_allowed_methods: list[str] = Field(default_factory=lambda: ["*"])
+    cors_allowed_headers: list[str] = Field(default_factory=lambda: ["*"])
+    strict_router_loading: bool = Field(default=True)
+    required_routers: list[str] = Field(default_factory=lambda: ["routers.chat", "routers.data"])
 
     @model_validator(mode="after")
     def validate_ranges(self) -> Self:
@@ -46,8 +58,14 @@ class AppSettings(BaseModel):
             try_on_daily_limit=int(os.getenv("TRY_ON_DAILY_LIMIT", "2")),
             upload_max_bytes=int(os.getenv("UPLOAD_MAX_BYTES", str(5 * 1024 * 1024))),
             auth_cache_ttl_seconds=int(os.getenv("AUTH_CACHE_TTL_SECONDS", "30")),
-            auth_required=_env_bool("AUTH_REQUIRED", False),
+            auth_required=_env_bool("AUTH_REQUIRED", True),
             redis_url=str(os.getenv("REDIS_URL", "redis://localhost:6379/0")),
+            cors_allowed_origins=_env_csv("CORS_ALLOWED_ORIGINS", "*"),
+            cors_allow_credentials=_env_bool("CORS_ALLOW_CREDENTIALS", False),
+            cors_allowed_methods=_env_csv("CORS_ALLOWED_METHODS", "*"),
+            cors_allowed_headers=_env_csv("CORS_ALLOWED_HEADERS", "*"),
+            strict_router_loading=_env_bool("STRICT_ROUTER_LOADING", True),
+            required_routers=_env_csv("REQUIRED_ROUTERS", "routers.chat,routers.data"),
         )
 
 

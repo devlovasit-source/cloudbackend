@@ -1,342 +1,211 @@
-import base64
-import time
-from typing import Any, Dict
+from __future__ import annotations
 
+from typing import Any, Dict, List
+
+from brain.daily_dependency_engine import build_daily_dependency_response
 from brain.intent_engine import detect_intent
-
-from brain.engines.outfit_engine import outfit_engine
-from brain.engines.style_scorer import style_scorer
-from brain.engines.style_board_engine import style_board_engine
-from brain.engines.style_board_renderer import style_board_renderer
-from brain.engines.refinement_engine import refinement_engine
-from brain.engines.memory_scorer import memory_scorer
-from brain.engines.proactive_engine import proactive_engine
-from brain.engines.style_graph_engine import style_graph_engine
-
-from brain.tone.archetype_learning_engine import archetype_learning_engine
+from brain.outfit_pipeline import get_daily_outfits
+from brain.plan_pack_flow import build_plan_pack_response
 from brain.response.response_assembler import response_assembler
+from brain.tone.tone_engine import tone_engine
+from services.appwrite_proxy import AppwriteProxy
 
-from services.qdrant_service import qdrant_service
-from services.embedding_service import embedding_service
+
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
-class Orchestrator:
+def _dict(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
-    def handle(self, user_input: str, user: Dict[str, Any]) -> Dict[str, Any]:
 
-        context = self._build_context(user)
+def _extract_occasion(text: str, slots: Dict[str, Any], context: Dict[str, Any]) -> str:
+    explicit = _safe_text(slots.get("occasion") or context.get("occasion"))
+    if explicit:
+        return explicit.lower()
 
-        print("\n=== PIPELINE START ===")
-        print("INPUT:", user_input)
+    lowered = (text or "").lower()
+    if "wedding" in lowered:
+        return "wedding"
+    if "party" in lowered:
+        return "party"
+    if "office" in lowered or "work" in lowered:
+        return "office"
+    if "date" in lowered:
+        return "date_night"
+    if "travel" in lowered or "trip" in lowered:
+        return "travel"
+    return ""
 
-        intent_data = detect_intent(
-            user_text=user_input,
-            history=user.get("history", []),
-            context=context
+
+def _normalize_weather_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(context)
+    weather_data = _dict(out.get("weather_data"))
+    if not weather_data and isinstance(out.get("user_profile"), dict):
+        weather_data = _dict(_dict(out["user_profile"]).get("weather"))
+    out["weather_data"] = weather_data
+    if not out.get("weather") and weather_data.get("condition"):
+        out["weather"] = _safe_text(weather_data.get("condition")).lower()
+    return out
+
+
+def _wardrobe_from_appwrite(user_id: str) -> List[Dict[str, Any]]:
+    try:
+        docs = AppwriteProxy().list_documents("outfits", user_id=user_id, limit=200)
+    except Exception:
+        return []
+    if not isinstance(docs, list):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        rows.append(
+            {
+                "id": d.get("$id") or d.get("id"),
+                "name": d.get("name"),
+                "category": d.get("category") or d.get("main_category"),
+                "sub_category": d.get("sub_category") or d.get("subcategory"),
+                "color": d.get("color") or d.get("color_code"),
+                "pattern": d.get("pattern"),
+                "occasion_tags": d.get("occasions") or [],
+                "weather_tags": d.get("weather") or [],
+                "style": d.get("style") or d.get("vibe"),
+                "fabric": d.get("fabric"),
+                "fit": d.get("fit"),
+            }
         )
+    return rows
 
-        intent = intent_data.get("intent", "general")
-        slots = intent_data.get("slots", {})
 
-        print("INTENT:", intent_data)
+def _visual_intelligence_from_outfit(outfit: Dict[str, Any]) -> Dict[str, Any]:
+    parts = [
+        _dict(outfit.get("top")),
+        _dict(outfit.get("bottom")),
+        _dict(outfit.get("dress")),
+        _dict(outfit.get("shoes")),
+    ] + [x for x in (outfit.get("accessories") or []) if isinstance(x, dict)]
+    colors = [_safe_text(p.get("color")).lower() for p in parts if _safe_text(p.get("color"))]
+    patterns = [_safe_text(p.get("pattern")).lower() for p in parts if _safe_text(p.get("pattern"))]
+    styles = [_safe_text(p.get("style")).lower() for p in parts if _safe_text(p.get("style"))]
+    return {
+        "dominant_palette": sorted(set(colors))[:4],
+        "pattern_mix": sorted(set(patterns))[:4],
+        "style_signals": sorted(set(styles))[:4],
+        "composition_score": float(outfit.get("score") or 0.0),
+        "story": _safe_text(_dict(outfit.get("story")).get("subtitle") or outfit.get("explanation")),
+    }
 
-        context.update({
-            "intent": intent,
-            "intent_meta": intent_data,
-            "slots": slots,
-            "user_input": user_input,
-            "occasion": slots.get("occasion"),
-            "weather": slots.get("weather"),
-            "mode": slots.get("mode"),
-        })
 
-        # TEMP WARDROBE
-        if not context.get("wardrobe"):
-            print("⚠️ Using TEMP wardrobe")
-            context["wardrobe"] = self._get_temp_wardrobe()
+class AhviOrchestrator:
+    def run(self, *, text: str, user_id: str | None = None, context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        query = _safe_text(text)
+        uid = _safe_text(user_id) or _safe_text(_dict(context).get("user_id")) or "user_1"
+        ctx = _normalize_weather_context(_dict(context))
+        user_profile = _dict(ctx.get("user_profile"))
 
-        print("WARDROBE SIZE:", len(context.get("wardrobe", [])))
+        intent_row = detect_intent(query, history=(ctx.get("history") or []))
+        intent = _safe_text(intent_row.get("intent")).lower() or "general"
+        slots = _dict(intent_row.get("slots"))
+        occasion = _extract_occasion(query, slots, ctx)
+        if occasion:
+            ctx["occasion"] = occasion
 
-        context["signals"] = {
-            "intent": intent,
-            "intent_source": intent_data.get("source"),
-            "confidence": intent_data.get("confidence"),
-            "occasion": context.get("occasion"),
-            "weather": context.get("weather"),
-            "user_memory": context.get("user_memory"),
-            "session": context.get("session"),
-        }
+        if intent == "daily_dependency":
+            out = build_daily_dependency_response(user_id=uid, context=ctx)
+            out["meta"] = {**_dict(out.get("meta")), "intent": intent, "confidence": float(intent_row.get("confidence", 0.0))}
+            return out
 
-        context = proactive_engine.inject(context)
+        if intent == "plan_pack":
+            out = build_plan_pack_response(query, ctx)
+            out["success"] = True
+            out["meta"] = {**_dict(out.get("meta")), "intent": intent, "confidence": float(intent_row.get("confidence", 0.0))}
+            return out
 
-        # ROUTING
-        if context.get("proactive_signals"):
-            result = self._handle_styling(context)
-
-        elif slots.get("mode") == "feed":
-            result = self._build_feed(context)
-
-        elif slots.get("mode") == "explore":
-            result = self._explore(context)
-
-        elif slots.get("mode") == "similar":
-            result = self._similar(context)
-
-        elif slots.get("feedback"):
-            result = self._feedback(context)
-
-        elif intent == "styling":
-            result = self._handle_styling(context)
-
-        else:
-            result = {
-                "type": "text",
-                "message": "Tell me what you need — styling, meals, or plans.",
-                "data": {}
+        if intent == "wardrobe_query":
+            docs = _wardrobe_from_appwrite(uid)
+            return {
+                "success": True,
+                "message": f"You currently have {len(docs)} items in your wardrobe.",
+                "board": "wardrobe",
+                "type": "stats",
+                "cards": [],
+                "data": {"total_items": len(docs)},
+                "meta": {"intent": intent, "confidence": float(intent_row.get("confidence", 0.0))},
             }
 
-        print("RESULT TYPE:", result.get("type"))
+        if intent in {"daily_outfit", "occasion_outfit", "explore_styles"}:
+            wardrobe = ctx.get("wardrobe")
+            if not isinstance(wardrobe, (list, dict)) or not wardrobe:
+                wardrobe = _wardrobe_from_appwrite(uid)
 
-        context["signals"].update({
-            "aesthetic": context.get("aesthetic"),
-            "item_explanations": context.get("item_explanations"),
-            "reasons": context.get("reasons"),
-        })
+            outfit_result = get_daily_outfits(
+                {
+                    "user_id": uid,
+                    "wardrobe": wardrobe,
+                    "context": {
+                        **ctx,
+                        "query": query,
+                        "occasion": occasion or _safe_text(ctx.get("occasion")),
+                    },
+                }
+            )
 
-        response = self._safe(
-            lambda: response_assembler.assemble(result, context),
-            {"message": {"role": "assistant", "content": "Something went wrong"}}
-        )
+            outfits = outfit_result.get("outfits") if isinstance(outfit_result.get("outfits"), list) else []
+            visual_intel = _visual_intelligence_from_outfit(_dict(outfits[0])) if outfits else {}
 
-        print("RESPONSE READY")
-        print("=== PIPELINE END ===\n")
+            message = _safe_text(outfit_result.get("context") or outfit_result.get("message"))
+            if outfits and not message:
+                message = _safe_text(_dict(_dict(outfits[0]).get("story")).get("subtitle") or _dict(outfits[0]).get("explanation"))
+            if not message:
+                message = "Your visual intelligence result is ready."
 
+            first_outfit = _dict(outfits[0]) if outfits else {}
+            toned = tone_engine.apply(
+                message,
+                user_profile=user_profile,
+                signals={"context_mode": "styling", **_dict(ctx.get("signals"))},
+                context={
+                    "aesthetic": first_outfit.get("aesthetic"),
+                    "outfit_data": {"items": [x for x in first_outfit.values() if isinstance(x, dict)]},
+                },
+            )
+
+            return {
+                "success": True,
+                "message": toned,
+                "board": "style",
+                "type": "cards",
+                "cards": outfit_result.get("cards") if isinstance(outfit_result.get("cards"), list) else [],
+                "board_ids": ",".join(outfit_result.get("board_item_ids") or []),
+                "data": {
+                    "outfits": outfits,
+                    "visual_intelligence": visual_intel,
+                    "pipeline": _dict(outfit_result.get("pipeline")),
+                },
+                "meta": {
+                    "intent": intent,
+                    "confidence": float(intent_row.get("confidence", 0.0)),
+                    "visual_intelligence_enabled": True,
+                },
+            }
+
+        merged = {
+            "type": "general",
+            "message": "Tell me what you need: outfit, planning, or organizing help.",
+            "data": {},
+        }
+        fallback = response_assembler.assemble(merged_output=merged, context={"user_profile": user_profile, "signals": {"context_mode": "home"}})
         return {
             "success": True,
-            **response,
-            "meta": {
-                "type": result.get("type", "text"),
-                "intent": intent,
-                "source": intent_data.get("source"),
-                "confidence": intent_data.get("confidence")
-            }
+            "message": fallback,
+            "board": "general",
+            "type": "text",
+            "cards": [],
+            "data": {},
+            "meta": {"intent": intent, "confidence": float(intent_row.get("confidence", 0.0))},
         }
 
-    def _build_context(self, user):
 
-        memory = user.get("memory", {}) or {}
-
-        return {
-            "user_id": user.get("user_id"),
-            "wardrobe": user.get("wardrobe", []),
-            "style_dna": user.get("style_dna", {}),
-            "user_profile": user.get("profile", {}),
-            "user_memory": memory,
-            "conversation_profile": memory.get("conversation_memory", {}),
-            "session": user.get("session", {}),
-            "refinement": user.get("refinement"),
-        }
-
-    def _get_temp_wardrobe(self):
-        return [
-            {"type": "shirt", "color": "white", "category": "top", "style": "minimal"},
-            {"type": "t-shirt", "color": "black", "category": "top", "style": "streetwear"},
-            {"type": "jeans", "color": "blue", "category": "bottom", "style": "casual"},
-            {"type": "trousers", "color": "beige", "category": "bottom", "style": "formal"},
-            {"type": "sneakers", "color": "white", "category": "footwear", "style": "casual"},
-            {"type": "loafers", "color": "brown", "category": "footwear", "style": "formal"},
-        ]
-
-    def _safe(self, fn, fallback):
-        try:
-            return fn()
-        except Exception as e:
-            print("ERROR:", e)
-            return fallback
-
-    def _handle_styling(self, context):
-
-        result = self._safe(
-            lambda: outfit_engine.generate(
-                context.get("wardrobe", []),
-                context
-            ),
-            {"routes": []}
-        )
-
-        routes = result.get("routes", [])
-
-        outfits = []
-        for r in routes:
-            outfit = r.get("outfit", {})
-            if outfit:
-                outfit["route_type"] = r.get("type")
-                outfit["route_label"] = r.get("label")
-                outfits.append(outfit)
-
-        print("OUTFITS GENERATED:", len(outfits))
-
-        if not outfits:
-            return {"type": "styling", "data": {}}
-
-        outfits = refinement_engine.apply(outfits, context)
-        # =========================
-        # BUILD GRAPH FOR SCORING
-        # =========================
-        graph = None
-
-        try:
-            wardrobe = context.get("wardrobe", [])
-        
-            graph = style_graph_engine.build_graph({
-                "tops": [i for i in wardrobe if i.get("category") in ["top", "tops"]],
-                "bottoms": [i for i in wardrobe if i.get("category") in ["bottom", "bottoms"]],
-                "shoes": [i for i in wardrobe if i.get("category") in ["footwear", "shoes"]],
-            })
-        
-        except Exception as e:
-            print("GRAPH BUILD ERROR:", e)
-        scored = []
-
-        for o in outfits:
-
-            o["embedding"] = self._embed_outfit(o, context)
-
-            base = style_scorer.score_outfit(o, context, graph)
-            base_score = base.get("score", 0)
-
-            memory_score = memory_scorer.score(
-                o.get("embedding"),
-                context.get("user_memory", {})
-            )
-
-            final = base_score + memory_score
-
-            o.update({
-                "final_score": final,
-                "memory_score": memory_score,
-                "label": base.get("label"),
-                "reasons": base.get("reasons", [])
-            })
-
-            print("SCORE:", final)
-
-            scored.append(o)
-
-        scored.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-        selected = scored[:3]
-
-        context["item_explanations"] = [
-            o.get("item_explanations") for o in selected
-        ]
-        context["reasons"] = [
-            o.get("reasons") for o in selected
-        ]
-
-        boards = []
-
-        for o in selected:
-
-            board = None
-            image = None
-
-            try:
-                board = style_board_engine.build_board(o, context)
-                image = style_board_renderer.render(board)
-            except Exception as e:
-                print("BOARD/RENDER ERROR:", e)
-
-            self._safe(
-                lambda: qdrant_service.upsert_style_board(
-                    board_id=o.get("id"),
-                    vector=o.get("embedding"),
-                    payload={
-                        "userId": context.get("user_id"),
-                        "aesthetic": o.get("aesthetic"),
-                        "occasion": context.get("occasion"),
-                    },
-                ),
-                None
-            )
-
-            boards.append({
-                "id": o.get("id"),
-                "image_base64": base64.b64encode(image).decode() if image else None,
-                "embedding": o.get("embedding"),
-                "aesthetic": o.get("aesthetic"),
-                "description": o.get("description"),
-                "score": o.get("final_score"),
-                "label": o.get("label"),
-                "reasons": o.get("reasons"),
-                "refined": o.get("refined"),
-                "route_type": o.get("route_type"),
-                "route_label": o.get("route_label")
-            })
-
-        context["aesthetic"] = selected[0].get("aesthetic")
-
-        return {
-            "type": "styling",
-            "data": {
-                "outfits": selected,
-                "boards": boards
-            }
-        }
-
-    def _build_feed(self, context):
-        return {"type": "feed", "data": []}
-
-    def _explore(self, context):
-        return {"type": "explore", "data": qdrant_service.get_all_boards(limit=50)}
-
-    def _similar(self, context):
-        return {
-            "type": "similar",
-            "data": qdrant_service.search_similar_boards(
-                context.get("embedding"),
-                limit=15
-            )
-        }
-
-    def _feedback(self, context):
-
-        memory = context.get("user_memory", {})
-        embedding = context.get("embedding")
-        signals = context.get("slots", {})
-
-        if signals.get("feedback") == "like" and embedding:
-            memory.setdefault("liked_embeddings", []).append({
-                "value": embedding,
-                "ts": time.time()
-            })
-
-        if signals.get("feedback") == "dislike" and embedding:
-            memory.setdefault("disliked_embeddings", []).append({
-                "value": embedding,
-                "ts": time.time()
-            })
-
-        memory = archetype_learning_engine.update(memory, signals)
-
-        self._safe(
-            lambda: qdrant_service.upsert_user_profile(
-                user_id=context.get("user_id"),
-                vector=embedding,
-                payload={"memory": memory}
-            ),
-            None
-        )
-
-        return {"type": "feedback", "data": memory}
-
-    def _embed_outfit(self, outfit, context):
-
-        return embedding_service.encode_metadata({
-            "aesthetic": outfit.get("aesthetic"),
-            "colors": outfit.get("colors"),
-            "category": outfit.get("category"),
-            "occasion": context.get("occasion"),
-        })
-
-
-ahvi_orchestrator = Orchestrator()
+ahvi_orchestrator = AhviOrchestrator()
+orchestrator = ahvi_orchestrator

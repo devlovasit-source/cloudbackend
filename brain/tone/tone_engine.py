@@ -57,7 +57,13 @@ class ToneEngine:
         # -------------------------
         # 5. APPLY OUTFIT TONE
         # -------------------------
-        text = self._apply_outfit_tone(text, aesthetic)
+        text = self._apply_outfit_tone(
+            text,
+            aesthetic,
+            context_mode=context_mode,
+            generation=generation,
+            context_rules=context_rules,
+        )
 
         # -------------------------
         # 6. APPLY LEARNED USER STYLE
@@ -164,7 +170,8 @@ class ToneEngine:
             "structure": "sharp" if "formal" in styles else "relaxed"
         }
 
-    def _apply_outfit_tone(self, text, aesthetic):
+    def _apply_outfit_tone(self, text, aesthetic, context_mode: str = "general", generation: str = "other", context_rules: dict = None):
+        context_rules = context_rules or {}
 
         if not aesthetic:
             return text
@@ -172,11 +179,13 @@ class ToneEngine:
         if aesthetic.get("structure") == "sharp":
             text = text.replace("This works", "This is clean")
 
-        if aesthetic.get("vibe") == "street":
-            text += " Lowkey fire."
+        allow_expressive = context_mode in {"styling", "shopping"} and int(context_rules.get("slang_cap", 0) or 0) >= 20
+
+        if aesthetic.get("vibe") == "street" and allow_expressive and generation == "gen_z":
+            text += " This lands with confident street energy."
 
         if aesthetic.get("vibe") == "minimal":
-            text += " Super clean."
+            text += " The finish stays clean and intentional."
 
         return text
 

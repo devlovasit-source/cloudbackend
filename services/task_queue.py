@@ -8,16 +8,19 @@ logger = logging.getLogger("ahvi.task_queue")
 
 
 def enqueue_task(
+    task_func=None,
     *,
-    task_func,
     args: Iterable[Any] | None = None,
     kwargs: Dict[str, Any] | None = None,
-    kind: str,
-    user_id: str | None,
-    source: str,
+    kind: str = "generic",
+    user_id: str | None = None,
+    source: str = "api",
     request_id: str | None = None,
     meta: Dict[str, Any] | None = None,
 ) -> str:
+    if task_func is None or not hasattr(task_func, "delay"):
+        raise ValueError("enqueue_task requires a Celery task function with .delay()")
+
     safe_args = list(args or [])
     safe_kwargs = dict(kwargs or {})
     rid = str(request_id or safe_kwargs.get("request_id") or get_request_id()).strip()

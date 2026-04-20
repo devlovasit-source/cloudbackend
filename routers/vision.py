@@ -17,6 +17,7 @@ from services.image_embedding_service import encode_image_base64
 from services.image_fingerprint import compute_pixel_hash_from_base64
 from services.qdrant_service import qdrant_service
 from services.task_queue import enqueue_task
+from brain.engines.color_normalizer import color_normalizer
 
 try:
     from worker import vision_analyze_task
@@ -106,10 +107,25 @@ def _input_has_alpha(image_base64: str) -> bool:
 # BG OPTIMIZATION HELPERS
 # =========================
 _BG_CACHE = {}
+_BG_CACHE_MAX_ITEMS = max(64, int(os.getenv("VISION_BG_CACHE_MAX_ITEMS", "512")))
 
 
 def _hash_base64(b64: str) -> str:
     return hashlib.md5(b64.encode()).hexdigest()
+
+
+def _bg_cache_get(cache_key: str):
+    row = _BG_CACHE.get(cache_key)
+    if not isinstance(row, dict):
+        return None
+    return row.get("value")
+
+
+def _bg_cache_set(cache_key: str, value: str) -> None:
+    _BG_CACHE[cache_key] = {"value": value, "time": time.time()}
+    if len(_BG_CACHE) > _BG_CACHE_MAX_ITEMS:
+        oldest_key = min(_BG_CACHE.items(), key=lambda kv: float(kv[1].get("time") or 0.0))[0]
+        _BG_CACHE.pop(oldest_key, None)
 
 
 def _resize_if_needed(base64_str: str, max_size=1024):
@@ -150,8 +166,9 @@ def _remove_bg_first(image_base64: str):
 
     # 3. Cache
     cache_key = _hash_base64(base64_clean)
-    if cache_key in _BG_CACHE:
-        return _BG_CACHE[cache_key], True, "cache_hit"
+    cached = _bg_cache_get(cache_key)
+    if cached:
+        return cached, True, "cache_hit"
 
     # 4. Local BG remover (Railway)
     if BGRemoveRequest is not None and remove_background_sync is not None:
@@ -161,7 +178,7 @@ def _remove_bg_first(image_base64: str):
 
             if isinstance(result, dict) and result.get("success") and result.get("image_base64"):
                 processed = _to_png_data_uri(result.get("image_base64"))
-                _BG_CACHE[cache_key] = processed
+                _bg_cache_set(cache_key, processed)
                 return processed, True, "local_success"
 
         except Exception as exc:
@@ -182,7 +199,7 @@ def _remove_bg_first(image_base64: str):
                 data = response.json()
                 if data.get("success") and data.get("image_base64"):
                     processed = _to_png_data_uri(data["image_base64"])
-                    _BG_CACHE[cache_key] = processed
+                    _bg_cache_set(cache_key, processed)
                     return processed, True, f"runpod_success_{attempt+1}"
 
         except requests.exceptions.Timeout:
@@ -201,7 +218,7 @@ def _remove_bg_first(image_base64: str):
             encoded = base64.b64encode(output).decode()
             processed = f"data:image/png;base64,{encoded}"
 
-            _BG_CACHE[cache_key] = processed
+            _bg_cache_set(cache_key, processed)
             return processed, True, "rembg_fallback"
 
         except Exception as e:
@@ -484,10 +501,27 @@ def _generate_improvements(items, rel):
 
 def _build_style_meta(item):
     color = str(item.get("color_code") or "#000000").upper()
-    tone = "minimal" if color in ["#000000", "#FFFFFF", "#888888"] else "expressive"
+    expression_tone = "minimal" if color in ["#000000", "#FFFFFF", "#888888"] else "expressive"
+    color_tone = color_normalizer.detect_tone(color)
     return {
-        "tone": tone,
+        "tone": expression_tone,
+        "color_tone": color_tone,
         "versatility": "high" if item.get("pattern") == "plain" else "medium",
+    }
+
+
+def _build_visual_intelligence(final_data, items, rel, style_meta):
+    color_hex = str(final_data.get("color_code") or "#000000")
+    return {
+        "dominant_color_hex": color_hex,
+        "dominant_color_name": _hex_to_color_name(color_hex),
+        "temperature_tone": style_meta.get("color_tone"),
+        "expression_tone": style_meta.get("tone"),
+        "item_type": str(final_data.get("sub_category") or ""),
+        "style_consistency": rel.get("style_consistency"),
+        "color_harmony": rel.get("color_harmony"),
+        "completeness": rel.get("completeness"),
+        "items_detected": len(items or []),
     }
 
 
@@ -605,6 +639,7 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
     score = _score_outfit(rel)
     improvements = _generate_improvements(items, rel)
     style_meta = _build_style_meta(final_data)
+    visual_intelligence = _build_visual_intelligence(final_data, items, rel, style_meta)
 
     image_duplicate = {"checked": False, "is_duplicate": False, "id": None, "score": 0.0}
     pixel_duplicate = {"checked": False, "is_duplicate": False, "id": None, "distance": None}
@@ -656,6 +691,7 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
             "analysis": rel,
         },
         "style": style_meta,
+        "visual_intelligence": visual_intelligence,
         "improvements": improvements,
         "processed_image_base64": vision_input_base64,
         "similar_items": similar_items,
@@ -675,6 +711,8 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
             "pixel_duplicate_max_distance": pixel_max_distance,
             "pixel_hash": pixel_hash or None,
             "probable_duplicate": probable_duplicate,
+            "tone_engine_used": True,
+            "visual_intelligence_enabled": True,
         },
     }
 
@@ -689,5 +727,7 @@ def analyze_image_async(http_request: Request, request: ImageAnalyzeRequest):
         kwargs={"request_id": str(getattr(http_request.state, "request_id", "") or "")},
         kind="vision_analyze",
         user_id=request.userId,
+        source="routers.vision.analyze_image_async",
+        request_id=str(getattr(http_request.state, "request_id", "") or ""),
     )
     return {"success": True, "status": "queued", "task_id": task_id}

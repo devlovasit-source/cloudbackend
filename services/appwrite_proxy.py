@@ -11,6 +11,10 @@ class AppwriteProxyError(Exception):
 
 
 def _load_local_env() -> None:
+    allow_local = str(os.getenv("APPWRITE_PROXY_LOAD_LOCAL_ENV", "false")).strip().lower()
+    if allow_local not in {"1", "true", "yes", "on"}:
+        return
+
     cwd = os.getcwd()
     parent = os.path.dirname(cwd)
     candidate_paths = [

@@ -14,6 +14,7 @@ _redis_client = None
 _redis_lock = asyncio.Lock()
 _local_lock = asyncio.Lock()
 _local_windows: dict[str, tuple[int, float]] = {}
+_LOCAL_WINDOW_MAX_BUCKETS = 10000
 
 
 async def get_redis_client():
@@ -58,6 +59,16 @@ def extract_client_ip(headers, client_host: str | None) -> str:
 async def _check_local_window(key: str, max_requests: int, window_seconds: int) -> Tuple[bool, int]:
     now = time.time()
     async with _local_lock:
+        if len(_local_windows) > _LOCAL_WINDOW_MAX_BUCKETS:
+            expired = [k for k, (_, reset_at) in _local_windows.items() if now >= reset_at]
+            for k in expired:
+                _local_windows.pop(k, None)
+            if len(_local_windows) > _LOCAL_WINDOW_MAX_BUCKETS:
+                oldest = sorted(_local_windows.items(), key=lambda kv: kv[1][1])[
+                    : max(0, len(_local_windows) - _LOCAL_WINDOW_MAX_BUCKETS)
+                ]
+                for k, _ in oldest:
+                    _local_windows.pop(k, None)
         count, reset_at = _local_windows.get(key, (0, now + window_seconds))
         if now >= reset_at:
             count = 0

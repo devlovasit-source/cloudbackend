@@ -2,7 +2,15 @@ import os
 from dotenv import load_dotenv
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, Distance, VectorParams
+from qdrant_client.models import (
+    PointStruct,
+    Distance,
+    VectorParams,
+    Filter,
+    FieldCondition,
+    MatchValue,
+)
+from services.image_fingerprint import hamming_distance_hex
 
 # Load env
 load_dotenv()
@@ -67,6 +75,9 @@ class QdrantService:
         if not self._initialized:
             self.init()
         return True
+
+    def enabled(self):
+        return bool(self.client)
 
     # =========================
     # 🔥 MAIN UPSERT (GENERIC)
@@ -150,11 +161,39 @@ class QdrantService:
         if not self._ensure():
             return []
 
+    def semantic_retrieve(self, query_vector, user_id, limit=40):
+        if not self._ensure():
+            return []
         try:
+            query_filter = Filter(
+                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+            )
+            results = self.client.search(
+                collection_name=self.collection,
+                query_vector=query_vector,
+                limit=max(1, int(limit)),
+                query_filter=query_filter,
+            )
+            return [
+                {
+                    "id": str(r.id),
+                    "score": float(r.score),
+                    "payload": r.payload or {},
+                }
+                for r in results
+            ]
+        except Exception:
+            return []
+
+        try:
+            query_filter = Filter(
+                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+            )
             results = self.client.search(
                 collection_name=self.collection,
                 query_vector=vector,
                 limit=limit,
+                query_filter=query_filter,
             )
 
             return [
@@ -164,7 +203,6 @@ class QdrantService:
                     "payload": r.payload or {},
                 }
                 for r in results
-                if str(r.payload.get("userId")) == str(user_id)
             ]
 
         except Exception as e:
@@ -275,6 +313,69 @@ class QdrantService:
             )
         except Exception as e:
             print("❌ Image upsert failed:", str(e))
+
+    def find_image_duplicate(self, image_vector, user_id, threshold=0.985):
+        if not self._ensure() or not image_vector:
+            return {"checked": False, "is_duplicate": False, "id": None, "score": 0.0}
+        try:
+            query_filter = Filter(
+                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+            )
+            results = self.client.search(
+                collection_name=self.image_collection,
+                query_vector=image_vector,
+                limit=1,
+                query_filter=query_filter,
+            )
+            if not results:
+                return {"checked": True, "is_duplicate": False, "id": None, "score": 0.0}
+            top = results[0]
+            score = float(getattr(top, "score", 0.0) or 0.0)
+            return {
+                "checked": True,
+                "is_duplicate": score >= float(threshold or 0.985),
+                "id": str(getattr(top, "id", "") or "") or None,
+                "score": score,
+            }
+        except Exception:
+            return {"checked": True, "is_duplicate": False, "id": None, "score": 0.0}
+
+    def find_pixel_duplicate(self, user_id, pixel_hash, max_distance=6):
+        if not self._ensure() or not pixel_hash:
+            return {"checked": False, "is_duplicate": False, "id": None, "distance": None}
+        try:
+            query_filter = Filter(
+                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+            )
+            response = self.client.scroll(
+                collection_name=self.collection,
+                scroll_filter=query_filter,
+                limit=200,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points = response[0] if isinstance(response, tuple) else []
+            best_id = None
+            best_distance = None
+            for point in points or []:
+                payload = getattr(point, "payload", {}) or {}
+                candidate_hash = str(payload.get("pixel_hash") or "")
+                if not candidate_hash:
+                    continue
+                distance = hamming_distance_hex(pixel_hash, candidate_hash)
+                if distance is None:
+                    continue
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_id = str(getattr(point, "id", "") or "") or None
+            return {
+                "checked": True,
+                "is_duplicate": best_distance is not None and int(best_distance) <= int(max_distance),
+                "id": best_id,
+                "distance": best_distance,
+            }
+        except Exception:
+            return {"checked": True, "is_duplicate": False, "id": None, "distance": None}
 
     # =========================
     # COSINE SIMILARITY

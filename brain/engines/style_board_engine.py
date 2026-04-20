@@ -1,8 +1,26 @@
-import random
+import hashlib
 from typing import Any, Dict, List
 
 from brain.engines.styling.palette_engine import palette_engine
 from brain.engines.color_normalizer import color_normalizer
+
+
+def _stable_unit(seed: str) -> float:
+    digest = hashlib.sha256(str(seed or "").encode("utf-8", errors="ignore")).digest()
+    return int.from_bytes(digest[:8], "big") / float(2**64)
+
+
+def _stable_uniform(a: float, b: float, *, seed: str) -> float:
+    u = _stable_unit(seed)
+    return float(a) + (float(b) - float(a)) * u
+
+
+def _stable_choice(options: List[Any], *, seed: str):
+    if not options:
+        return None
+    digest = hashlib.sha256(str(seed or "").encode("utf-8", errors="ignore")).digest()
+    idx = int.from_bytes(digest[:4], "big") % len(options)
+    return options[idx]
 
 
 class StyleBoardEngine:
@@ -184,11 +202,13 @@ class StyleBoardEngine:
         positions = [(0.2, 0.75), (0.8, 0.75), (0.3, 0.2), (0.7, 0.2)]
 
         for i, item in enumerate(supporting):
+            item_id = str(item.get("id") or "")
             placements[item.get("id")] = {
                 "x": positions[i % len(positions)][0],
                 "y": positions[i % len(positions)][1],
-                "scale": round(random.uniform(0.6, 0.85), 2),
-                "rotation": random.choice([-15, -5, 5, 15]),
+                # Deterministic placements: stable per item id (Pinterest-style but not random each request).
+                "scale": round(_stable_uniform(0.6, 0.85, seed=f"scale:{item_id}:{i}"), 2),
+                "rotation": _stable_choice([-15, -5, 5, 15], seed=f"rot:{item_id}:{i}"),
                 "z": 2 if i < 2 else 1
             }
 

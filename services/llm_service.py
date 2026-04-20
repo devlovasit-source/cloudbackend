@@ -27,6 +27,16 @@ MODEL_FALLBACKS = [
 DEFAULT_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "1024"))
 DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "300"))
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return float(default)
+
+
+DEFAULT_TEMPERATURE = _env_float("OLLAMA_TEMPERATURE", 0.2)
+
 # =========================
 # SESSION
 # =========================
@@ -43,11 +53,11 @@ def _call_ollama(payload, timeout=30):
     for model in [payload.get("model"), *MODEL_FALLBACKS]:
         try:
             payload["model"] = model
-            payload["options"] = {
-                "num_ctx": DEFAULT_NUM_CTX,
-                "num_predict": DEFAULT_NUM_PREDICT,
-                "temperature": 0.6,
-            }
+            options = dict(payload.get("options") or {})
+            options.setdefault("num_ctx", DEFAULT_NUM_CTX)
+            options.setdefault("num_predict", DEFAULT_NUM_PREDICT)
+            options.setdefault("temperature", DEFAULT_TEMPERATURE)
+            payload["options"] = options
 
             res = session.post(f"{OLLAMA_URL}/generate", json=payload, timeout=timeout)
 

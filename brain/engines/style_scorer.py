@@ -1,6 +1,5 @@
 
 from typing import Any, Dict, List
-import random
 
 from brain.engines.style_graph_engine import style_graph_engine
 from brain.engines.style_rules_engine import style_engine
@@ -246,7 +245,9 @@ class UnifiedStyleScorer:
         if len(set(styles)) >= 2:
             score += 0.4 * factor
 
-        score += random.uniform(0, 0.2) * factor
+        # Keep deterministic scoring in production (avoid random drift between calls).
+        # If we want "exploration" later, make it an explicit, client-controlled parameter.
+        score += 0.0
 
         return score
 

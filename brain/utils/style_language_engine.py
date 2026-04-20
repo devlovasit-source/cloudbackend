@@ -1,5 +1,7 @@
-from typing import Dict, List
-import random
+from __future__ import annotations
+
+from typing import Any, Dict, List
+import hashlib
 
 
 class StyleLanguageEngine:
@@ -12,6 +14,26 @@ class StyleLanguageEngine:
     - micro-variation (non-repetitive)
     - dynamic outfit composition (not fixed categories)
     """
+
+    def _stable_choice(self, options: List[str], *, seed: str) -> str:
+        if not options:
+            return ""
+        digest = hashlib.sha256(str(seed or "").encode("utf-8", errors="ignore")).digest()
+        idx = int.from_bytes(digest[:4], "big") % len(options)
+        return str(options[idx])
+
+    def _seed(self, context: Dict[str, Any] | None, key: str) -> str:
+        ctx = context or {}
+        return "|".join(
+            [
+                str(ctx.get("request_id") or ""),
+                str(ctx.get("user_id") or ""),
+                str(ctx.get("session_id") or ""),
+                str(ctx.get("occasion") or ""),
+                str(ctx.get("aesthetic") or ""),
+                str(key or ""),
+            ]
+        )
 
     # =========================
     # ITEM → TEXT
@@ -92,25 +114,25 @@ class StyleLanguageEngine:
             parts.append(", ".join(core))
 
         if layers:
-            parts.append(f"{self._layer_connector()} {', '.join(layers)}")
+            parts.append(f"{self._layer_connector(context=context)} {', '.join(layers)}")
 
         if extras:
-            parts.append(f"{self._finish_connector()} {', '.join(extras)}")
+            parts.append(f"{self._finish_connector(context=context)} {', '.join(extras)}")
 
         base = ", ".join(parts)
 
         # =========================
         # 🔥 TONE LAYERS
         # =========================
-        opener = self._pick_opener(aesthetic)
-        occasion_phrase = self._occasion_phrase(occasion)
+        opener = self._pick_opener(aesthetic, context=context)
+        occasion_phrase = self._occasion_phrase(occasion, context=context)
 
         return f"{opener} {base}. {occasion_phrase}".strip()
 
     # =========================
     # 🔥 OCCASION ENGINE
     # =========================
-    def _occasion_phrase(self, occasion: str) -> str:
+    def _occasion_phrase(self, occasion: str, *, context: Dict | None = None) -> str:
 
         occasion_map = {
             "date": [
@@ -147,17 +169,17 @@ class StyleLanguageEngine:
 
         for key, phrases in occasion_map.items():
             if key in occasion:
-                return random.choice(phrases)
+                return self._stable_choice(phrases, seed=self._seed(context, f"occasion:{key}"))
 
-        return random.choice([
+        return self._stable_choice([
             "Everything comes together effortlessly.",
             "It all feels balanced and intentional.",
-        ])
+        ], seed=self._seed(context, "occasion:default"))
 
     # =========================
     # 🔥 AESTHETIC OPENERS
     # =========================
-    def _pick_opener(self, aesthetic: str) -> str:
+    def _pick_opener(self, aesthetic: str, *, context: Dict | None = None) -> str:
 
         tone_map = {
             "minimal": [
@@ -188,30 +210,36 @@ class StyleLanguageEngine:
 
         for key, options in tone_map.items():
             if key in aesthetic:
-                return random.choice(options)
+                return self._stable_choice(options, seed=self._seed(context, f"opener:{key}"))
 
-        return random.choice([
+        return self._stable_choice([
             "Well-balanced and considered —",
             "Cleanly put together —",
             "Sharp without trying too hard —",
-        ])
+        ], seed=self._seed(context, "opener:default"))
 
     # =========================
     # CONNECTORS (VARIATION)
     # =========================
-    def _layer_connector(self) -> str:
-        return random.choice([
-            "layered with",
-            "topped with",
-            "finished with a layer of",
-        ])
+    def _layer_connector(self, *, context: Dict | None = None) -> str:
+        return self._stable_choice(
+            [
+                "layered with",
+                "topped with",
+                "finished with a layer of",
+            ],
+            seed=self._seed(context, "connector:layer"),
+        )
 
-    def _finish_connector(self) -> str:
-        return random.choice([
-            "finished with",
-            "grounded by",
-            "anchored with",
-        ])
+    def _finish_connector(self, *, context: Dict | None = None) -> str:
+        return self._stable_choice(
+            [
+                "finished with",
+                "grounded by",
+                "anchored with",
+            ],
+            seed=self._seed(context, "connector:finish"),
+        )
 
     # =========================
     # CLEANER

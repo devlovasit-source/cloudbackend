@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/wardrobe/capture", tags=["wardrobe-capture"])
 class CaptureAnalyzeRequest(BaseModel):
     user_id: str
     image_base64: str = Field(..., min_length=20)
+    auto_save: bool = False
 
 
 class SaveSelectedRequest(BaseModel):
@@ -208,18 +209,18 @@ def analyze_capture(http_request: Request, request: CaptureAnalyzeRequest):
             "image_embedding": embedding,
         }]
 
-    # =========================
-    # 🔥 AUTO SAVE (DEMO SAFE)
-    # =========================
-    try:
-        persist_selected_items(
-            user_id=request.user_id,
-            selected_item_ids=[i["item_id"] for i in items],
-            detected_items=items,
-        )
-        print("AUTO SAVE SUCCESS ✅")
-    except Exception as e:
-        print("AUTO SAVE FAILED ❌", e)
+    # Save only when explicitly requested by the client.
+    # The normal product flow is: analyze -> user selects -> save-selected.
+    if bool(request.auto_save):
+        try:
+            persist_selected_items(
+                user_id=request.user_id,
+                selected_item_ids=[i["item_id"] for i in items],
+                detected_items=items,
+            )
+        except Exception as exc:
+            # Keep analyze stable even if persistence fails.
+            print("[wardrobe.capture] auto_save failed:", str(exc))
 
     return {
         "success": True,

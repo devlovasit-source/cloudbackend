@@ -26,16 +26,36 @@ JOB_TTL = 300  # 5 mins
 # CACHE
 # =========================
 _BG_CACHE = {}
+_BG_CACHE_MAX_ITEMS = max(64, int(os.getenv("BG_CACHE_MAX_ITEMS", "512")))
 
 def _hash_base64(b64):
     return hashlib.md5(b64.encode()).hexdigest()
+
+
+def _normalize_base64(value: str) -> str:
+    text = (value or "").strip()
+    return text.split(",", 1)[1] if "," in text else text
+
+
+def _bg_cache_set(cache_key: str, value: str) -> None:
+    _BG_CACHE[cache_key] = {"value": value, "time": time.time()}
+    if len(_BG_CACHE) > _BG_CACHE_MAX_ITEMS:
+        oldest_key = min(_BG_CACHE.items(), key=lambda kv: float((kv[1] or {}).get("time") or 0.0))[0]
+        _BG_CACHE.pop(oldest_key, None)
+
+
+def _bg_cache_get(cache_key: str):
+    row = _BG_CACHE.get(cache_key)
+    if isinstance(row, dict):
+        return row.get("value")
+    return row
 
 # =========================
 # PREPROCESS
 # =========================
 def _resize_if_needed(base64_str, max_size=1024):
     try:
-        img_bytes = base64.b64decode(base64_str)
+        img_bytes = base64.b64decode(_normalize_base64(base64_str), validate=True)
         np_arr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
@@ -61,7 +81,7 @@ def _resize_if_needed(base64_str, max_size=1024):
 # =========================
 def _has_alpha(base64_str):
     try:
-        img_bytes = base64.b64decode(base64_str)
+        img_bytes = base64.b64decode(_normalize_base64(base64_str), validate=True)
         np_arr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
         return img is not None and len(img.shape) == 3 and img.shape[2] == 4
@@ -78,6 +98,12 @@ class BGRemoveRequest(BaseModel):
     @validator("image_base64")
     def validate_base64(cls, v):
         if not v or len(v) < 100:
+            raise ValueError("Invalid image")
+        try:
+            decoded = base64.b64decode(_normalize_base64(v), validate=True)
+            if len(decoded) < 64:
+                raise ValueError("Invalid image")
+        except Exception:
             raise ValueError("Invalid image")
         return v
 
@@ -137,8 +163,9 @@ def worker():
 
             # 🔥 CACHE
             cache_key = _hash_base64(job["image"])
-            if cache_key in _BG_CACHE:
-                job["result"] = _BG_CACHE[cache_key]
+            cached = _bg_cache_get(cache_key)
+            if cached:
+                job["result"] = cached
                 job["done"] = True
                 task_queue.task_done()
                 continue
@@ -175,7 +202,7 @@ def worker():
                 job["done"] = True
 
                 cache_key = _hash_base64(job["image"])
-                _BG_CACHE[cache_key] = result
+                _bg_cache_set(cache_key, result)
 
         except Exception as e:
             for job in job_refs:
@@ -216,10 +243,11 @@ threading.Thread(target=cleanup_worker, daemon=True).start()
 # =========================
 def enqueue_job(image_base64):
     job_id = str(uuid.uuid4())
+    normalized = _normalize_base64(image_base64)
 
     job = {
         "id": job_id,
-        "image": image_base64,
+        "image": normalized,
         "done": False,
         "result": None,
         "error": None,

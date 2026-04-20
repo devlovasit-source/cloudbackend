@@ -15,6 +15,7 @@ except Exception:
     run_heavy_audio_task = None
 
 from brain.orchestrator import ahvi_orchestrator
+from brain.tone.tone_engine import tone_engine
 from brain.outfit_pipeline import save_feedback
 from services.appwrite_proxy import AppwriteProxy
 try:
@@ -196,6 +197,46 @@ def _detect_mode(text: str) -> str:
 
     return "fashion"
 
+
+def _infer_user_message_style(text: str) -> Dict[str, str]:
+    raw = str(text or "")
+    lowered = raw.lower()
+    length = len(raw.strip())
+
+    emoji_count = sum(1 for ch in raw if ord(ch) > 10000)
+    if emoji_count >= 3:
+        emoji_density = "high"
+    elif emoji_count == 2:
+        emoji_density = "medium"
+    elif emoji_count == 1:
+        emoji_density = "low"
+    else:
+        emoji_density = "none"
+
+    slang_tokens = ["lowkey", "highkey", "vibe", "it's giving", "main character", "mid"]
+    slang_hits = sum(1 for token in slang_tokens if token in lowered)
+    if slang_hits >= 3:
+        slang_presence = "high"
+    elif slang_hits == 2:
+        slang_presence = "medium"
+    elif slang_hits == 1:
+        slang_presence = "low"
+    else:
+        slang_presence = "none"
+
+    if length <= 80:
+        length_bucket = "short"
+    elif length <= 220:
+        length_bucket = "medium"
+    else:
+        length_bucket = "long"
+
+    return {
+        "message_length_bucket": length_bucket,
+        "emoji_density": emoji_density,
+        "slang_presence": slang_presence,
+    }
+
 # -------------------------
 # MODELS
 # -------------------------
@@ -263,12 +304,20 @@ def text_chat(request: TextChatRequest, http_request: Request):
         raise HTTPException(status_code=400, detail="Empty message")
 
     user_id = request.user_id or request.userID or "user_1"
+    user_message_style = _infer_user_message_style(user_input)
 
     # -------------------------
     # FAST PATH
     # -------------------------
     if _is_fast_wardrobe_count_query(user_input):
-        return _fast_wardrobe_count_response(user_id, user_input)
+        fast = _fast_wardrobe_count_response(user_id, user_input)
+        fast["message"] = tone_engine.apply(
+            str(fast.get("message") or ""),
+            user_profile=request.user_profile,
+            signals={"context_mode": "home", "user_message_style": user_message_style},
+            context={},
+        )
+        return fast
 
     # -------------------------
     # CACHE
@@ -303,7 +352,12 @@ def text_chat(request: TextChatRequest, http_request: Request):
     if mode == "greeting":
         return {
             "success": True,
-            "message": "Hey! I can help you style outfits or just chat 😊",
+            "message": tone_engine.apply(
+                "Hey, I can help you style outfits or just chat.",
+                user_profile=request.user_profile,
+                signals={"context_mode": "home", "user_message_style": user_message_style},
+                context={},
+            ),
             "cards": [],
             "meta": {"mode": "greeting"},
             "audio_job_id": "offline",
@@ -313,7 +367,12 @@ def text_chat(request: TextChatRequest, http_request: Request):
         try:
             return {
                 "success": True,
-                "message": lightweight_chat(english_input),
+                "message": tone_engine.apply(
+                    lightweight_chat(english_input),
+                    user_profile=request.user_profile,
+                    signals={"context_mode": "home", "user_message_style": user_message_style},
+                    context={},
+                ),
                 "cards": [],
                 "meta": {"mode": "casual"},
                 "audio_job_id": "offline",
@@ -353,6 +412,7 @@ def text_chat(request: TextChatRequest, http_request: Request):
                 "history": merged_history[-20:],
                 "weather": weather_data.get("condition"),
                 "time_of_day": weather_data.get("time_of_day"),
+                "signals": {"user_message_style": user_message_style},
             },
         )
 

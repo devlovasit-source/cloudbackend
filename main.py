@@ -582,41 +582,10 @@ def analyze_compat(payload: VisionCompatRequest):
     user_id = str(payload.user_id or payload.userId or "demo_user").strip() or "demo_user"
     try:
         core = vision_analyze_core(payload.image_base64, user_id)
+    except HTTPException:
+        raise
     except Exception as exc:
-        user_input_payload = {
-            "name": "",
-            "category": "",
-            "sub_category": "",
-            "pattern": "",
-            "occasions": [],
-            "color_code": "",
-        }
-        return {
-            "success": False,
-            "requires_user_input": True,
-            "message": "Vision model unavailable. Please enter item details manually.",
-            "data": user_input_payload,
-            "items": [
-                {
-                    "id": "manual-input-required",
-                    **user_input_payload,
-                }
-            ],
-            "similar_items": [],
-            "duplicate": {"is_duplicate": False, "id": None, "score": 0.0},
-            "meta": {
-                "llm_only": True,
-                "vision_model_used": None,
-                "analysis_source": "manual_input_required",
-                "ollama_error": str(exc),
-            },
-            "questions": [
-                "What is the garment type (top, bottom, dress, footwear, accessory)?",
-                "What is the sub-category (for example trousers, shirt, sneakers)?",
-                "What is the primary color and pattern?",
-                "Which occasions does this item fit?",
-            ],
-        }
+        raise HTTPException(status_code=502, detail=f"Vision analysis failed: {exc}")
 
     if not isinstance(core, dict):
         raise HTTPException(status_code=502, detail="Vision analyzer returned invalid payload")
@@ -649,7 +618,7 @@ def analyze_compat(payload: VisionCompatRequest):
         "duplicate": duplicate,
         "meta": {
             "vision_model_used": meta.get("vision_model_used"),
-            "duplicate_threshold": meta.get("duplicate_threshold"),
+            "duplicate_threshold": meta.get("duplicate_threshold") or meta.get("image_duplicate_threshold"),
             "llm_only": bool(meta.get("llm_fallback")),
             "analysis_source": "ollama",
             "llm_fallback": bool(meta.get("llm_fallback")),

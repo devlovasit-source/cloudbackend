@@ -74,6 +74,14 @@ def _image_duplicate_threshold() -> float:
         return 0.985
 
 
+def _vision_max_image_bytes() -> int:
+    try:
+        val = int(os.getenv("VISION_MAX_IMAGE_BYTES", str(12 * 1024 * 1024)))
+        return max(512 * 1024, val)
+    except Exception:
+        return 12 * 1024 * 1024
+
+
 class ImageAnalyzeRequest(BaseModel):
     image_base64: str = Field(..., min_length=20)
     userId: str = "demo_user"
@@ -90,6 +98,32 @@ def _normalize_base64_for_model(value: str) -> str:
 def _to_png_data_uri(base64_text: str) -> str:
     text = _normalize_base64_for_model(base64_text)
     return f"data:image/png;base64,{text}"
+
+
+def _decode_and_validate_image(image_base64: str, max_bytes: int):
+    try:
+        base64_data = _normalize_base64_for_model(image_base64)
+        img_data = base64.b64decode(base64_data, validate=True)
+        if len(img_data) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"image payload too large (max {max_bytes} bytes)")
+        np_arr = np.frombuffer(img_data, np.uint8)
+        decoded = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+        if decoded is None:
+            raise HTTPException(status_code=400, detail="invalid image payload")
+
+        cv_image = (
+            cv2.cvtColor(decoded, cv2.COLOR_BGRA2BGR)
+            if (decoded.ndim == 3 and decoded.shape[2] == 4)
+            else (decoded if decoded.ndim == 3 else cv2.imdecode(np_arr, cv2.IMREAD_COLOR))
+        )
+        if cv_image is None:
+            raise HTTPException(status_code=400, detail="invalid image payload")
+
+        return base64_data, decoded, cv_image
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image payload: {str(e)}")
 
 
 def _input_has_alpha(image_base64: str) -> bool:
@@ -529,91 +563,20 @@ def _build_visual_intelligence(final_data, items, rel, style_meta):
 def analyze_image(request: ImageAnalyzeRequest):
     try:
         return vision_analyze_core(request.image_base64, request.userId)
-    except HTTPException as exc:
-        # Hardening: avoid breaking wardrobe flow when vision model stack is unstable.
-        # Return a safe fallback garment classification instead of bubbling failure.
-        base64_data = _normalize_base64_for_model(request.image_base64)
-        fallback = {
-            "name": "Neutral Shirt",
-            "category": "Tops",
-            "sub_category": "Shirt",
-            "pattern": "plain",
-            "occasions": ["daily wear", "casual outing", "weekend", "travel", "office"],
-            "color_code": "#888888",
-            "userId": request.userId or "demo_user",
-        }
-        return {
-            "success": True,
-            "data": fallback,
-            "processed_image_base64": base64_data,
-            "similar_items": [],
-            "meta": {
-                "bg_removed": False,
-                "bg_fallback_reason": f"vision_fallback_http_{exc.status_code}",
-                "llm_fallback": True,
-                "vision_model_used": None,
-                "similarity_enabled": False,
-                "embedding_created": False,
-                "similar_items_found": 0,
-                "probable_duplicate": False,
-                "fallback_reason": str(exc.detail),
-            },
-        }
+    except HTTPException:
+        raise
     except Exception as exc:
-        base64_data = _normalize_base64_for_model(request.image_base64)
-        fallback = {
-            "name": "Neutral Shirt",
-            "category": "Tops",
-            "sub_category": "Shirt",
-            "pattern": "plain",
-            "occasions": ["daily wear", "casual outing", "weekend", "travel", "office"],
-            "color_code": "#888888",
-            "userId": request.userId or "demo_user",
-        }
-        return {
-            "success": True,
-            "data": fallback,
-            "processed_image_base64": base64_data,
-            "similar_items": [],
-            "meta": {
-                "bg_removed": False,
-                "bg_fallback_reason": "vision_fallback_exception",
-                "llm_fallback": True,
-                "vision_model_used": None,
-                "similarity_enabled": False,
-                "embedding_created": False,
-                "similar_items_found": 0,
-                "probable_duplicate": False,
-                "fallback_reason": str(exc),
-            },
-        }
+        raise HTTPException(status_code=500, detail=f"vision analyze failed: {exc}")
 
 
 def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
+    max_bytes = _vision_max_image_bytes()
+    # Validate payload first so invalid/oversized uploads fail before heavy BG processing.
+    _, _, _ = _decode_and_validate_image(image_base64, max_bytes=max_bytes)
+
     vision_input_base64, bg_removed, bg_fallback_reason = _remove_bg_first(image_base64)
-
-    base64_data = _normalize_base64_for_model(vision_input_base64)
-    try:
-        img_data = base64.b64decode(base64_data, validate=True)
-        if len(img_data) > 12 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="image payload too large (max 12MB)")
-        np_arr = np.frombuffer(img_data, np.uint8)
-        decoded = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
-        if decoded is None:
-            raise HTTPException(status_code=400, detail="invalid image payload")
-
-        cv_image = (
-            cv2.cvtColor(decoded, cv2.COLOR_BGRA2BGR)
-            if (decoded.ndim == 3 and decoded.shape[2] == 4)
-            else (decoded if decoded.ndim == 3 else cv2.imdecode(np_arr, cv2.IMREAD_COLOR))
-        )
-        if cv_image is None:
-            raise HTTPException(status_code=400, detail="invalid image payload")
-        extracted_color_hex = get_dominant_color(cv_image)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid image payload: {str(e)}")
+    base64_data, decoded, cv_image = _decode_and_validate_image(vision_input_base64, max_bytes=max_bytes)
+    extracted_color_hex = get_dominant_color(cv_image)
 
     llm_fallback = False
     model_used = None
@@ -705,10 +668,14 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
             "similar_items_found": len(similar_items),
             "image_duplicate_checked": bool(image_duplicate.get("checked")),
             "image_duplicate_threshold": image_duplicate_threshold,
+            "duplicate_threshold": image_duplicate_threshold,
             "image_duplicate_score": float(image_duplicate.get("score") or 0.0),
+            "image_duplicate_point_id": image_duplicate.get("id"),
             "pixel_duplicate_checked": bool(pixel_duplicate.get("checked")),
             "pixel_duplicate_distance": pixel_duplicate.get("distance"),
             "pixel_duplicate_max_distance": pixel_max_distance,
+            "pixel_duplicate_point_id": pixel_duplicate.get("id"),
+            "top_similarity_score": top_similarity_score,
             "pixel_hash": pixel_hash or None,
             "probable_duplicate": probable_duplicate,
             "tone_engine_used": True,

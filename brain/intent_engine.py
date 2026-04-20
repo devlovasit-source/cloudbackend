@@ -100,13 +100,14 @@ def _fallback_intent(text: str) -> Dict[str, Any]:
         return {"intent": "wardrobe_query", "slots": slots, "confidence": 0.8}
 
     organize_words = [
-        "organize", "life board", "meal planner", "medicine", "meds", "bills",
-        "calendar", "workout", "skincare", "contacts", "life goals", "goals"
+        "organize", "life board", "meal planner", "meal", "diet", "nutrition",
+        "medicine", "meds", "bills", "calendar", "workout", "fitness", "gym",
+        "skincare", "contacts", "life goals", "goals"
     ]
     if any(x in t for x in organize_words):
         if "life board" in t:
             slots["module"] = "life_boards"
-        elif "meal" in t:
+        elif "meal" in t or "diet" in t or "nutrition" in t:
             slots["module"] = "meal_planner"
         elif "med" in t:
             slots["module"] = "medicines"
@@ -114,7 +115,7 @@ def _fallback_intent(text: str) -> Dict[str, Any]:
             slots["module"] = "bills"
         elif "calendar" in t:
             slots["module"] = "calendar"
-        elif "workout" in t:
+        elif "workout" in t or "fitness" in t or "gym" in t:
             slots["module"] = "workout"
         elif "skin" in t:
             slots["module"] = "skincare"

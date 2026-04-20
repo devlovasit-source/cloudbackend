@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from brain.daily_dependency_engine import build_daily_dependency_response
+from brain.engines.fitness.fitness_engine import fitness_engine
 from brain.intent_engine import detect_intent
 from brain.outfit_pipeline import get_daily_outfits
 from brain.plan_pack_flow import build_plan_pack_response
@@ -49,6 +50,48 @@ def _normalize_weather_context(context: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _resolve_organize_module(text: str, slots: Dict[str, Any], context: Dict[str, Any]) -> str:
+    slot_module = _safe_text(slots.get("module")).lower()
+    if slot_module:
+        return slot_module
+
+    module_context = _safe_text(context.get("module_context")).lower()
+    if module_context:
+        if "meal" in module_context or "diet" in module_context or "nutrition" in module_context:
+            return "meal_planner"
+        if "workout" in module_context or "fitness" in module_context or "gym" in module_context:
+            return "workout"
+        if "skin" in module_context:
+            return "skincare"
+        if "calendar" in module_context:
+            return "calendar"
+        if "bill" in module_context:
+            return "bills"
+        if "contact" in module_context:
+            return "contacts"
+        if "goal" in module_context:
+            return "life_goals"
+        if "life" in module_context:
+            return "life_boards"
+
+    lowered = (text or "").lower()
+    if any(k in lowered for k in ["meal", "diet", "nutrition", "calorie", "protein"]):
+        return "meal_planner"
+    if any(k in lowered for k in ["workout", "fitness", "gym", "exercise", "training"]):
+        return "workout"
+    if "skin" in lowered:
+        return "skincare"
+    if "calendar" in lowered:
+        return "calendar"
+    if "bill" in lowered:
+        return "bills"
+    if "contact" in lowered:
+        return "contacts"
+    if "goal" in lowered:
+        return "life_goals"
+    return "life_boards"
+
+
 def _wardrobe_from_appwrite(user_id: str) -> List[Dict[str, Any]]:
     try:
         docs = AppwriteProxy().list_documents("outfits", user_id=user_id, limit=200)
@@ -76,6 +119,97 @@ def _wardrobe_from_appwrite(user_id: str) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+def _safe_list_documents(collection: str, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    try:
+        rows = AppwriteProxy().list_documents(collection, user_id=user_id, limit=limit)
+    except Exception:
+        return []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _organize_hub_response(*, uid: str, query: str, module_key: str, context: Dict[str, Any], user_profile: Dict[str, Any]) -> Dict[str, Any]:
+    module = _safe_text(module_key).lower() or "life_boards"
+
+    if module == "meal_planner":
+        plans = _safe_list_documents("meal_plans", uid, limit=25)
+        latest_name = _safe_text((plans[0] if plans else {}).get("name") or (plans[0] if plans else {}).get("title")) if plans else ""
+        msg = f"You have {len(plans)} meal plans. I can help you build a diet-focused weekly flow."
+        if latest_name:
+            msg = f"You have {len(plans)} meal plans. Latest plan: {latest_name}."
+        toned = tone_engine.apply(msg, user_profile=user_profile, signals={"context_mode": "planning", **_dict(context.get("signals"))}, context=context)
+        return {
+            "success": True,
+            "message": toned,
+            "board": "meal_planner",
+            "type": "cards",
+            "cards": [
+                {"id": "meal_count", "title": "Meal Plans", "kind": "stat", "value": len(plans)},
+                {"id": "meal_open", "title": "Open Meal Planner", "kind": "action", "action": {"type": "open_module", "module": "meal_planner", "route": "/organize/meal-planner"}},
+                {"id": "meal_new", "title": "Create Diet Week", "kind": "action", "action": {"type": "open_module", "module": "meal_planner", "route": "/organize/meal-planner?create=1"}},
+            ],
+            "data": {"module": module, "total_plans": len(plans), "latest_plan": latest_name or None},
+        }
+
+    if module == "workout":
+        workouts = _safe_list_documents("workout_outfits", uid, limit=25)
+        fitness_input = {
+            "goal": "general_fitness",
+            "gender": _safe_text(user_profile.get("gender") or "universal").lower() or "universal",
+            "duration": int(context.get("duration") or 20),
+            "location": _safe_text(context.get("location") or "home").lower() or "home",
+            "equipment": _safe_text(context.get("equipment") or "none").lower() or "none",
+        }
+        rec = fitness_engine.recommend_workout(fitness_input)
+        rec_items = rec.get("recommendations") if isinstance(rec, dict) and isinstance(rec.get("recommendations"), list) else []
+        rec_items = sorted([x for x in rec_items if isinstance(x, dict)], key=lambda r: _safe_text(r.get("title")))[:3]
+        msg = f"You have {len(workouts)} saved workout entries. I picked {len(rec_items)} fitness suggestions."
+        toned = tone_engine.apply(msg, user_profile=user_profile, signals={"context_mode": "workout", **_dict(context.get("signals"))}, context=context)
+        cards: List[Dict[str, Any]] = [
+            {"id": "workout_count", "title": "Workout Entries", "kind": "stat", "value": len(workouts)},
+            {"id": "workout_open", "title": "Open Workout Board", "kind": "action", "action": {"type": "open_module", "module": "workout", "route": "/organize/workout"}},
+        ]
+        for idx, row in enumerate(rec_items, start=1):
+            cards.append(
+                {
+                    "id": f"workout_rec_{idx}",
+                    "title": _safe_text(row.get("title")) or f"Workout {idx}",
+                    "kind": "checklist",
+                    "items": [str(item) for item in (row.get("cards", [{}])[0].get("items", []) if isinstance(row.get("cards"), list) and row.get("cards") else [])][:5],
+                }
+            )
+        return {
+            "success": True,
+            "message": toned,
+            "board": "workout",
+            "type": "cards",
+            "cards": cards,
+            "data": {"module": module, "saved_workouts": len(workouts), "recommendations": rec_items},
+        }
+
+    route_map = {
+        "skincare": ("/organize/skincare", "skincare"),
+        "calendar": ("/organize/calendar", "calendar"),
+        "bills": ("/organize/bills", "bills"),
+        "contacts": ("/organize/contacts", "contacts"),
+        "life_goals": ("/organize/life-goals", "life_goals"),
+        "life_boards": ("/organize/life-boards", "life_boards"),
+        "medicines": ("/organize/medicines", "medicines"),
+    }
+    route, board = route_map.get(module, ("/organize/life-boards", "organize"))
+    msg = f"I routed this to {module.replace('_', ' ')} so you can continue in the right board."
+    toned = tone_engine.apply(msg, user_profile=user_profile, signals={"context_mode": "planning", **_dict(context.get("signals"))}, context=context)
+    return {
+        "success": True,
+        "message": toned,
+        "board": board,
+        "type": "cards",
+        "cards": [
+            {"id": "organize_open", "title": f"Open {module.replace('_', ' ').title()}", "kind": "action", "action": {"type": "open_module", "module": module, "route": route}}
+        ],
+        "data": {"module": module},
+    }
 
 
 def _visual_intelligence_from_outfit(outfit: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,26 +247,50 @@ class AhviOrchestrator:
 
         if intent == "daily_dependency":
             out = build_daily_dependency_response(user_id=uid, context=ctx)
+            out["message"] = tone_engine.apply(
+                _safe_text(out.get("message")),
+                user_profile=user_profile,
+                signals={"context_mode": "planning", **_dict(ctx.get("signals"))},
+                context=ctx,
+            )
             out["meta"] = {**_dict(out.get("meta")), "intent": intent, "confidence": float(intent_row.get("confidence", 0.0))}
             return out
 
         if intent == "plan_pack":
             out = build_plan_pack_response(query, ctx)
             out["success"] = True
+            out["message"] = tone_engine.apply(
+                _safe_text(out.get("message")),
+                user_profile=user_profile,
+                signals={"context_mode": "travel", **_dict(ctx.get("signals"))},
+                context=ctx,
+            )
             out["meta"] = {**_dict(out.get("meta")), "intent": intent, "confidence": float(intent_row.get("confidence", 0.0))}
             return out
 
         if intent == "wardrobe_query":
             docs = _wardrobe_from_appwrite(uid)
+            toned = tone_engine.apply(
+                f"You currently have {len(docs)} items in your wardrobe.",
+                user_profile=user_profile,
+                signals={"context_mode": "home", **_dict(ctx.get("signals"))},
+                context=ctx,
+            )
             return {
                 "success": True,
-                "message": f"You currently have {len(docs)} items in your wardrobe.",
+                "message": toned,
                 "board": "wardrobe",
                 "type": "stats",
                 "cards": [],
                 "data": {"total_items": len(docs)},
                 "meta": {"intent": intent, "confidence": float(intent_row.get("confidence", 0.0))},
             }
+
+        if intent == "organize_hub":
+            module_key = _resolve_organize_module(query, slots, ctx)
+            out = _organize_hub_response(uid=uid, query=query, module_key=module_key, context=ctx, user_profile=user_profile)
+            out["meta"] = {**_dict(out.get("meta")), "intent": intent, "module": module_key, "confidence": float(intent_row.get("confidence", 0.0))}
+            return out
 
         if intent in {"daily_outfit", "occasion_outfit", "explore_styles"}:
             wardrobe = ctx.get("wardrobe")

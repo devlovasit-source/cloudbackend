@@ -160,3 +160,10 @@ class WeatherEngine:
 
 # Singleton
 weather_engine = WeatherEngine()
+# -------------------------
+# BACKWARD COMPATIBILITY
+# -------------------------
+weather_engine = WeatherEngine()
+
+def get_hourly_weather(lat: float, lon: float):
+    return weather_engine.get_weather_context(lat, lon)

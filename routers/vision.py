@@ -157,6 +157,11 @@ def _persist_vision_result(
     if not processed:
         raise HTTPException(status_code=502, detail="missing processed image for persistence")
 
+    # Wardrobe flow: do not auto-save likely duplicates. The client can prompt the user
+    # to proceed with a dedicated "force save" flow later if desired.
+    if bool(meta.get("probable_duplicate")):
+        raise HTTPException(status_code=409, detail="probable duplicate; auto-save blocked")
+
     if not bool(meta.get("bg_removed")):
         raise HTTPException(status_code=409, detail="background not removed; cannot save masked image")
 

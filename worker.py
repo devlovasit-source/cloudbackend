@@ -10,6 +10,7 @@ from sentry_sdk.integrations.celery import CeleryIntegration
 import logging
 from services.job_tracker import job_tracker
 from services.request_context import set_request_id
+from services.settings import settings
 
 try:
     from sentry_sdk.integrations.redis import RedisIntegration
@@ -49,7 +50,7 @@ if _sentry_dsn and not _sentry_client_ready:
 # =========================
 # CELERY INIT
 # =========================
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis_url = str(getattr(settings, "redis_url", "") or os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 logger = logging.getLogger("ahvi.worker")
 
 celery_app = Celery(

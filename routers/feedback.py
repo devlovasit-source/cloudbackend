@@ -2,11 +2,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any
 
-from services.qdrant_service import QdrantService
-from services.embedding_service import encode_metadata 
+from services.qdrant_service import qdrant_service
+from services.embedding_service import encode_metadata
 router = APIRouter(prefix="/api/feedback")
-
-qdrant = QdrantService()
 
 
 # =========================
@@ -26,7 +24,7 @@ def feedback_item(request: ItemFeedbackRequest):
         raise HTTPException(status_code=400, detail="feedback must be up/down")
 
     try:
-        qdrant.update_feedback(request.item_id, fb)
+        qdrant_service.update_feedback(request.item_id, fb)
 
         return {
             "success": True,
@@ -59,15 +57,21 @@ def feedback_board(request: BoardFeedbackRequest):
         embedding = encode_metadata(request.board_payload)
 
         # 🔥 Store in Qdrant
-        qdrant.upsert_user_memory(
+        point_id = qdrant_service.upsert_user_memory(
             user_id=request.user_id,
             vector=embedding,
-            memory_type="liked" if action == "like" else "disliked"
+            memory_type="liked" if action == "like" else "disliked",
+            payload={
+                "source": "feedback.board",
+                "board": str(request.board_payload.get("board") or ""),
+                "type": str(request.board_payload.get("type") or ""),
+            },
         )
 
         return {
             "success": True,
-            "message": "Board feedback recorded"
+            "message": "Board feedback recorded",
+            "memory_point_id": point_id,
         }
 
     except Exception as e:

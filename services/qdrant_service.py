@@ -1,4 +1,6 @@
 import os
+import time
+import uuid
 from dotenv import load_dotenv
 
 from qdrant_client import QdrantClient
@@ -25,10 +27,14 @@ class QdrantService:
         # 🔥 LOCKED COLLECTIONS
         self.collection = os.getenv("QDRANT_COLLECTION", "wardrobe")
         self.memory_collection = os.getenv("QDRANT_MEMORY_COLLECTION", "outfit_memory")
+        # 384-d user preference memory (liked/disliked) used by brain/engines/memory_scorer.py
+        self.user_memory_collection = os.getenv("QDRANT_USER_MEMORY_COLLECTION", "user_memory")
         self.image_collection = os.getenv("QDRANT_IMAGE_COLLECTION", "wardrobe_image")
 
         self.vector_size = 384
-        self.memory_vector_size = 8
+        # 8-d outfit combo vectors used by brain/outfit_pipeline.py (keep small + fast)
+        self.memory_vector_size = int(os.getenv("QDRANT_MEMORY_VECTOR_SIZE", "8"))
+        self.user_memory_vector_size = int(os.getenv("QDRANT_USER_MEMORY_VECTOR_SIZE", str(self.vector_size)))
         self.image_vector_size = int(os.getenv("QDRANT_IMAGE_VECTOR_SIZE", "512"))
 
         self.client = None
@@ -51,6 +57,7 @@ class QdrantService:
 
         self._create_collection(self.collection, self.vector_size)
         self._create_collection(self.memory_collection, self.memory_vector_size)
+        self._create_collection(self.user_memory_collection, self.user_memory_vector_size)
         self._create_collection(self.image_collection, self.image_vector_size)
 
         self._initialized = True
@@ -160,6 +167,32 @@ class QdrantService:
     def search_similar(self, vector, user_id, limit=5):
         if not self._ensure():
             return []
+        if not vector:
+            return []
+
+        try:
+            query_filter = Filter(
+                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+            )
+            results = self.client.search(
+                collection_name=self.collection,
+                query_vector=vector,
+                limit=max(1, int(limit)),
+                query_filter=query_filter,
+            )
+
+            return [
+                {
+                    "id": str(r.id),
+                    "score": float(r.score),
+                    "payload": r.payload or {},
+                }
+                for r in results
+            ]
+
+        except Exception as e:
+            print("âŒ Search failed:", str(e))
+            return []
 
     def semantic_retrieve(self, query_vector, user_id, limit=40):
         if not self._ensure():
@@ -185,29 +218,7 @@ class QdrantService:
         except Exception:
             return []
 
-        try:
-            query_filter = Filter(
-                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
-            )
-            results = self.client.search(
-                collection_name=self.collection,
-                query_vector=vector,
-                limit=limit,
-                query_filter=query_filter,
-            )
-
-            return [
-                {
-                    "id": str(r.id),
-                    "score": float(r.score),
-                    "payload": r.payload or {},
-                }
-                for r in results
-            ]
-
-        except Exception as e:
-            print("❌ Search failed:", str(e))
-            return []
+        # Note: legacy duplicate block removed (it referenced an undefined `vector`).
 
     # =========================
     # BOARD SEARCH
@@ -298,6 +309,95 @@ class QdrantService:
             )
         except Exception as e:
             print("❌ Memory upsert failed:", str(e))
+
+    # =========================
+    # USER MEMORY (LIKED/DISLIKED)
+    # =========================
+    def upsert_user_memory(
+        self,
+        *,
+        user_id: str,
+        vector,
+        memory_type: str,
+        payload: dict | None = None,
+        point_id: str | None = None,
+    ) -> str | None:
+        if not self._ensure():
+            return None
+        if not vector:
+            return None
+
+        try:
+            if len(vector) != int(self.user_memory_vector_size):
+                print("❌ user_memory vector size mismatch:", len(vector), "expected", self.user_memory_vector_size)
+                return None
+        except Exception:
+            return None
+
+        mem_type = str(memory_type or "").strip().lower() or "liked"
+        pid = str(point_id or uuid.uuid4())
+        row = dict(payload or {})
+        row.setdefault("userId", str(user_id or ""))
+        row.setdefault("memory_type", mem_type)
+        row.setdefault("timestamp", float(time.time()))
+
+        try:
+            self.client.upsert(
+                collection_name=self.user_memory_collection,
+                points=[PointStruct(id=pid, vector=vector, payload=row)],
+            )
+            return pid
+        except Exception as e:
+            print("❌ User memory upsert failed:", str(e))
+            return None
+
+    def search_user_memory(
+        self,
+        *,
+        user_id: str,
+        vector,
+        memory_type: str | None = None,
+        limit: int = 5,
+    ):
+        if not self._ensure():
+            return []
+        if not vector:
+            return []
+
+        try:
+            if len(vector) != int(self.user_memory_vector_size):
+                return []
+        except Exception:
+            return []
+
+        try:
+            must = [FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+            if memory_type:
+                must.append(FieldCondition(key="memory_type", match=MatchValue(value=str(memory_type))))
+            query_filter = Filter(must=must)
+
+            results = self.client.search(
+                collection_name=self.user_memory_collection,
+                query_vector=vector,
+                limit=max(1, int(limit)),
+                query_filter=query_filter,
+                with_payload=True,
+            )
+
+            out = []
+            for r in results or []:
+                payload_row = getattr(r, "payload", None) or {}
+                out.append(
+                    {
+                        "id": str(getattr(r, "id", "") or ""),
+                        "score": float(getattr(r, "score", 0.0) or 0.0),
+                        "timestamp": payload_row.get("timestamp"),
+                        "payload": payload_row,
+                    }
+                )
+            return out
+        except Exception:
+            return []
 
     # =========================
     # IMAGE VECTOR

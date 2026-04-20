@@ -16,6 +16,11 @@ try:
 except Exception:
     calendar_runtime_task = None
 
+try:
+    from worker import calendar_daily_task
+except Exception:
+    calendar_daily_task = None
+
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
 
@@ -25,6 +30,10 @@ class CalendarTextRequest(BaseModel):
     endAtISO: str | None = None
     timezone: str | None = None
     dressCode: str | None = None
+
+
+class CalendarDailyRequest(BaseModel):
+    events: list[CalendarEventInput] = Field(default_factory=list)
 
 
 def _iso_now() -> str:
@@ -84,7 +93,35 @@ def process_text_async(http_request: Request, req: CalendarTextRequest, user=Dep
     return {"success": True, "status": "queued", "task_id": task_id}
 
 
+@router.post("/daily", response_model=list[CalendarRuntimeResult])
+def daily_runtime(req: CalendarDailyRequest, user=Depends(get_current_user)):
+    try:
+        user_id = str((user or {}).get("user_id") or "")
+        return [run_calendar_runtime(event, user_id=user_id) for event in (req.events or [])]
+    except Exception:
+        print("❌ /calendar/daily error:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Calendar daily processing failed")
+
+
+@router.post("/daily/async", status_code=status.HTTP_202_ACCEPTED)
+def daily_runtime_async(http_request: Request, req: CalendarDailyRequest, user=Depends(get_current_user)):
+    if calendar_daily_task is None:
+        raise HTTPException(status_code=503, detail="Worker not configured")
+
+    user_id = str((user or {}).get("user_id") or "")
+    events_payload = [event.model_dump() for event in (req.events or [])]
+    task_id = enqueue_task(
+        task_func=calendar_daily_task,
+        args=[{"events": events_payload}, user_id],
+        kwargs={"request_id": str(getattr(http_request.state, "request_id", "") or "")},
+        kind="calendar_daily_runtime",
+        user_id=user_id,
+        source="routers.calendar.daily_runtime_async",
+        request_id=str(getattr(http_request.state, "request_id", "") or ""),
+    )
+    return {"success": True, "status": "queued", "task_id": task_id}
+
+
 @router.get("/health")
 def calendar_health():
     return {"status": "ok", "engine": "calendar_runtime_v1", "auth": "enabled", "ready": True}
-

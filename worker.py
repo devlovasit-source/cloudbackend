@@ -178,3 +178,30 @@ def calendar_runtime_task(self, event: dict, user_id: str = "", request_id: str 
         _retry_or_fail(self, e, request_id=request_id)
 
 
+@celery_app.task(name="calendar_daily_task", bind=True)
+def calendar_daily_task(self, payload: dict, user_id: str = "", request_id: str = ""):
+    """
+    Batch calendar runtime for a list of events.
+    Payload shape: {"events": [CalendarEventInput-like dict, ...]}
+    """
+    from models.calendar_models import CalendarEventInput
+    from brain.engines.calendar_runtime import run_calendar_runtime
+
+    _mark_started(self, request_id=request_id, user_id=user_id)
+    try:
+        events = (payload or {}).get("events") or []
+        results = []
+        for raw in events:
+            parsed = CalendarEventInput.model_validate(raw or {})
+            results.append(run_calendar_runtime(parsed, user_id=user_id).model_dump())
+        _mark_succeeded(
+            self,
+            {"task": "calendar_daily_task", "request_id": request_id, "events": len(results)},
+            request_id=request_id,
+        )
+        return {"status": "success", "result": results}
+    except Exception as e:
+        logger.exception("CALENDAR DAILY TASK ERROR")
+        _retry_or_fail(self, e, request_id=request_id)
+
+

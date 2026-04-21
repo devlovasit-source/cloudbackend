@@ -349,17 +349,41 @@ class AhviOrchestrator:
             if not wardrobe:
                 wardrobe = _wardrobe_from_appwrite(uid)
 
-            outfit_result = get_daily_outfits(
-                {
-                    "user_id": uid,
-                    "wardrobe": wardrobe,
-                    "context": {
-                        **ctx,
-                        "query": query,
-                        "occasion": occasion or _safe_text(ctx.get("occasion")),
+            try:
+                outfit_result = get_daily_outfits(
+                    {
+                        "user_id": uid,
+                        "wardrobe": wardrobe,
+                        "context": {
+                            **ctx,
+                            "query": query,
+                            "occasion": occasion or _safe_text(ctx.get("occasion")),
+                        },
+                    }
+                )
+            except Exception as exc:
+                logger.exception("get_daily_outfits failed uid=%s intent=%s error=%s", uid, intent, str(exc))
+                toned = tone_engine.apply(
+                    "I hit a temporary issue while generating outfits. Please try again in a moment.",
+                    user_profile=user_profile,
+                    signals={"context_mode": "styling", **_dict(ctx.get("signals"))},
+                    context=ctx,
+                )
+                return {
+                    "success": True,
+                    "message": toned,
+                    "board": "style",
+                    "type": "text",
+                    "cards": [],
+                    "data": {},
+                    "meta": {
+                        "intent": intent,
+                        "confidence": float(intent_row.get("confidence", 0.0)),
+                        "wardrobe_source": wardrobe_source,
+                        "wardrobe_count": len(wardrobe),
+                        "error": "outfit_pipeline_failed",
                     },
                 }
-            )
 
             outfits = outfit_result.get("outfits") if isinstance(outfit_result.get("outfits"), list) else []
             visual_intel = _visual_intelligence_from_outfit(_first_dict(outfits)) if outfits else {}

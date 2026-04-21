@@ -1,5 +1,6 @@
 import base64
 import uuid
+import logging
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,7 @@ from services.appwrite_proxy import AppwriteProxy
 from services.r2_storage import R2Storage, R2StorageError
 
 router = APIRouter()
+logger = logging.getLogger("ahvi.stylist")
 
 
 class ItemContextRequest(BaseModel):
@@ -251,4 +253,25 @@ def run_outfit_pipeline(request: OutfitPipelineRequest):
             },
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}")
+        logger.exception("stylist.pipeline failed user_id=%s error=%s", request.user_id, str(exc))
+        return {
+            "success": False,
+            "board": "style",
+            "type": "cards",
+            "message": "Pipeline temporarily unavailable. Please try again.",
+            "cards": [],
+            "board_ids": "",
+            "data": {
+                "outfits": [],
+                "visual_intelligence": {},
+                "pipeline": {},
+                "rendered_boards": [],
+                "board_item_ids": [],
+            },
+            "meta": {
+                "count": 0,
+                "query": request.query,
+                "analysis_source": "outfit_pipeline",
+                "error": "outfit_pipeline_failed",
+            },
+        }

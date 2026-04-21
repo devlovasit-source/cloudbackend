@@ -6,8 +6,10 @@ import json
 
 class PaletteEngine:
     def __init__(self):
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        file_path = os.path.join(base_dir, "data", "palette_data.json")
+        # Keep the engine data-driven and avoid hard paths that drift from the repo layout.
+        here = os.path.dirname(os.path.abspath(__file__))  # brain/engines/styling
+        brain_dir = os.path.abspath(os.path.join(here, "..", ".."))  # brain/
+        file_path = os.path.join(brain_dir, "banks", "events", "color_palette_bank_v1.json")
 
         try:
             with open(file_path, "r", encoding="utf-8") as f:

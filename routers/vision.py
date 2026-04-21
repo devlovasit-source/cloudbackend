@@ -529,10 +529,35 @@ def _shape_vision_output(raw_data, color_hex: str, decoded_img, cv_image) -> dic
 # =========================
 # ELITE INTELLIGENCE LAYER
 # =========================
+def _canonical_item_type(sub_category: str) -> str:
+    s = str(sub_category or "").strip().lower().replace("_", "-")
+    if not s:
+        return "item"
+
+    if any(x in s for x in ["t-shirt", "tshirt", "tee"]):
+        return "t-shirt"
+    if "shirt" in s:
+        return "shirt"
+    if any(x in s for x in ["trouser", "pant", "jean", "chino"]):
+        return "trousers"
+    if "skirt" in s:
+        return "skirt"
+    if "dress" in s:
+        return "dress"
+    if any(x in s for x in ["hoodie", "sweater", "pullover"]):
+        return "hoodie"
+    if any(x in s for x in ["jacket", "coat", "blazer", "outerwear"]):
+        return "outerwear"
+    if any(x in s for x in ["shoe", "sneaker", "heel", "boot", "loafer", "sandal", "slipper"]):
+        return "shoes"
+
+    return s
+
+
 def _build_items_from_single(final_data):
     return [{
-        "type": str(final_data.get("sub_category") or "item").lower(),
-        "color": final_data.get("color_code", "#000000"),
+        "type": _canonical_item_type(final_data.get("sub_category")),
+        "color": str(final_data.get("color_code") or "#000000").upper(),
         "style": "casual",
     }]
 
@@ -541,8 +566,8 @@ def _analyze_outfit_relationship(items):
     types = [i.get("type", "") for i in items]
     colors = [i.get("color", "") for i in items]
 
-    has_top = any(t in ["shirt", "t-shirt", "top"] for t in types)
-    has_bottom = any(t in ["pants", "jeans", "trousers"] for t in types)
+    has_top = any(t in ["shirt", "t-shirt", "top", "hoodie"] for t in types)
+    has_bottom = any(t in ["pants", "jeans", "trousers", "skirt"] for t in types)
 
     completeness = "complete" if (has_top and has_bottom) else "partial"
     harmony = "clean" if len(set(colors)) <= 2 else "busy"
@@ -557,15 +582,48 @@ def _analyze_outfit_relationship(items):
     }
 
 
-def _score_outfit(rel):
-    score = 70
+def _score_outfit(rel, items, style_meta, final_data):
+    """
+    Deterministic scoring (no randomness) that still feels dynamic.
+    The goal is stable UX signals, not "perfect fashion truth".
+    """
+    score = 55
+
     if rel.get("completeness") == "complete":
-        score += 10
+        score += 15
     if rel.get("color_harmony") == "clean":
         score += 10
+    else:
+        score -= 5
+
     if rel.get("style_consistency") == "cohesive":
         score += 10
-    return min(score, 100)
+    else:
+        score -= 5
+
+    pattern = str(final_data.get("pattern") or "plain").strip().lower()
+    if pattern == "plain":
+        score += 10
+    elif pattern in {"striped", "checked", "denim"}:
+        score += 7
+    else:
+        score += 4
+
+    if style_meta.get("versatility") == "high":
+        score += 8
+    else:
+        score += 4
+
+    if style_meta.get("tone") == "minimal":
+        score += 4
+    else:
+        score += 2
+
+    # More items increases confidence slightly.
+    if len(items or []) >= 2:
+        score += 2
+
+    return max(0, min(int(round(score)), 100))
 
 
 def _generate_improvements(items, rel):
@@ -686,7 +744,7 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
 
     items = _build_items_from_single(final_data)
     rel = _analyze_outfit_relationship(items)
-    score = _score_outfit(rel)
+    score = _score_outfit(rel, items, style_meta, final_data)
     improvements = _generate_improvements(items, rel)
     style_meta = _build_style_meta(final_data)
     visual_intelligence = _build_visual_intelligence(final_data, items, rel, style_meta)

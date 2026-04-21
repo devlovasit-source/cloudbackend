@@ -24,6 +24,18 @@ def _dict(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _first_dict(value: Any) -> Dict[str, Any]:
+    """
+    Return the first dict from a list-like value; otherwise {}.
+    Guards visual-intel/outfit extraction from non-dict list entries.
+    """
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, dict):
+            return dict(first)
+    return {}
+
+
 def _coerce_wardrobe_payload(value: Any) -> list[dict]:
     """
     Normalize wardrobe payloads coming from UI context and/or Appwrite.
@@ -350,7 +362,7 @@ class AhviOrchestrator:
             )
 
             outfits = outfit_result.get("outfits") if isinstance(outfit_result.get("outfits"), list) else []
-            visual_intel = _visual_intelligence_from_outfit(_dict(outfits[0])) if outfits else {}
+            visual_intel = _visual_intelligence_from_outfit(_first_dict(outfits)) if outfits else {}
 
             message = _safe_text(outfit_result.get("context") or outfit_result.get("message"))
             if outfits and not message:

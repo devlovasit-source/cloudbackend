@@ -66,6 +66,12 @@ def _dict(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _first_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        return dict(value[0])
+    return {}
+
+
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -221,7 +227,7 @@ def run_outfit_pipeline(request: OutfitPipelineRequest):
             include_base64=bool(request.include_base64),
             upload_style_boards_to_r2=bool(request.upload_style_boards_to_r2),
         )
-        visual_intelligence = _visual_intelligence_from_outfit(_dict(outfits[0])) if outfits else {}
+        visual_intelligence = _visual_intelligence_from_outfit(_first_dict(outfits)) if outfits else {}
 
         return {
             "success": True,

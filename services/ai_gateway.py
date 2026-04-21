@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import ast
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, List, Tuple
@@ -192,7 +193,8 @@ def extract_json(text: str) -> Any:
     if not raw:
         raise ValueError("empty response")
 
-    clean = re.sub(r"```(?:json)?", "", raw, flags=re.IGNORECASE).replace("```", "").strip()
+    clean = re.sub(r"```(?:json|python|text)?", "", raw, flags=re.IGNORECASE).replace("```", "").strip()
+    clean = clean.strip()
 
     try:
         return json.loads(clean)
@@ -210,11 +212,42 @@ def extract_json(text: str) -> Any:
     if arr_start != -1 and arr_end > arr_start:
         candidates.append(clean[arr_start : arr_end + 1])
 
-    for candidate in candidates:
+    def _remove_trailing_commas(value: str) -> str:
+        return re.sub(r",\s*([}\]])", r"\1", value)
+
+    def _json_to_python_literals(value: str) -> str:
+        out = value
+        out = re.sub(r"\btrue\b", "True", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bfalse\b", "False", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bnull\b", "None", out, flags=re.IGNORECASE)
+        return out
+
+    def _try_parse(candidate: str) -> Any | None:
+        text_candidate = str(candidate or "").strip()
+        if not text_candidate:
+            return None
+
         try:
-            return json.loads(candidate)
+            return json.loads(text_candidate)
         except Exception:
-            continue
+            pass
+
+        repaired = _remove_trailing_commas(text_candidate)
+        if repaired != text_candidate:
+            try:
+                return json.loads(repaired)
+            except Exception:
+                pass
+
+        try:
+            return ast.literal_eval(_json_to_python_literals(repaired))
+        except Exception:
+            return None
+
+    for candidate in candidates:
+        parsed = _try_parse(candidate)
+        if parsed is not None:
+            return parsed
 
     raise ValueError("no valid JSON found in model response")
 
@@ -240,14 +273,22 @@ def generate_json_object(
     user_profile: Dict[str, Any] | None = None,
     signals: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    return parse_json_object(
-        generate_text(
-            prompt=prompt,
-            options=options,
-            user_profile=user_profile,
-            signals=signals,
-        )
+    raw = generate_text(
+        prompt=prompt,
+        options=options,
+        user_profile=user_profile,
+        signals=signals,
     )
+    try:
+        return parse_json_object(raw)
+    except Exception as exc:
+        logger.warning(
+            "generate_json_object parse failed request_id=%s error=%s raw=%s",
+            get_request_id(),
+            str(exc),
+            str(raw)[:240],
+        )
+        return {}
 
 
 def chat_json_object(
@@ -258,15 +299,23 @@ def chat_json_object(
     user_profile: Dict[str, Any] | None = None,
     signals: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    return parse_json_object(
-        chat_completion(
-            messages=messages,
-            system_instruction=system_instruction,
-            model=model,
-            user_profile=user_profile,
-            signals=signals,
-        )
+    raw = chat_completion(
+        messages=messages,
+        system_instruction=system_instruction,
+        model=model,
+        user_profile=user_profile,
+        signals=signals,
     )
+    try:
+        return parse_json_object(raw)
+    except Exception as exc:
+        logger.warning(
+            "chat_json_object parse failed request_id=%s error=%s raw=%s",
+            get_request_id(),
+            str(exc),
+            str(raw)[:240],
+        )
+        return {}
 
 
 def _vision_model_candidates() -> List[str]:

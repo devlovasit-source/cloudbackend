@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any, Dict, List
 
 from brain.daily_dependency_engine import build_daily_dependency_response
@@ -11,6 +13,8 @@ from brain.response.response_assembler import response_assembler
 from brain.tone.tone_engine import tone_engine
 from services.appwrite_proxy import AppwriteProxy
 
+logger = logging.getLogger("ahvi.orchestrator")
+
 
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
@@ -18,6 +22,40 @@ def _safe_text(value: Any) -> str:
 
 def _dict(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _coerce_wardrobe_payload(value: Any) -> list[dict]:
+    """
+    Normalize wardrobe payloads coming from UI context and/or Appwrite.
+    Prevents silent failures where a dict/string is passed into the outfit pipeline.
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [x for x in value if isinstance(x, dict)]
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, dict)]
+            if isinstance(parsed, dict):
+                value = parsed
+        except Exception:
+            return []
+
+    if isinstance(value, dict):
+        for key in ("items", "documents", "wardrobe", "data"):
+            inner = value.get(key)
+            if isinstance(inner, list):
+                return [x for x in inner if isinstance(x, dict)]
+        return []
+
+    return []
 
 
 def _extract_occasion(text: str, slots: Dict[str, Any], context: Dict[str, Any]) -> str:
@@ -293,8 +331,10 @@ class AhviOrchestrator:
             return out
 
         if intent in {"daily_outfit", "occasion_outfit", "explore_styles"}:
-            wardrobe = ctx.get("wardrobe")
-            if not isinstance(wardrobe, (list, dict)) or not wardrobe:
+            wardrobe_ctx = ctx.get("wardrobe")
+            wardrobe = _coerce_wardrobe_payload(wardrobe_ctx)
+            wardrobe_source = "ctx" if wardrobe else "appwrite"
+            if not wardrobe:
                 wardrobe = _wardrobe_from_appwrite(uid)
 
             outfit_result = get_daily_outfits(
@@ -329,22 +369,43 @@ class AhviOrchestrator:
                 },
             )
 
+            board_item_ids = outfit_result.get("board_item_ids") if isinstance(outfit_result.get("board_item_ids"), list) else []
+            board_item_ids = [str(x).strip() for x in board_item_ids if str(x).strip()]
+            primary_board_id = board_item_ids[0] if board_item_ids else ""
+
+            try:
+                logger.info(
+                    "style intent=%s uid=%s wardrobe_source=%s wardrobe_count=%s cards=%s board_id=%s",
+                    intent,
+                    uid,
+                    wardrobe_source,
+                    len(wardrobe),
+                    len(outfit_result.get("cards") or []) if isinstance(outfit_result.get("cards"), list) else 0,
+                    primary_board_id,
+                )
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "message": toned,
                 "board": "style",
                 "type": "cards",
                 "cards": outfit_result.get("cards") if isinstance(outfit_result.get("cards"), list) else [],
-                "board_ids": ",".join(outfit_result.get("board_item_ids") or []),
+                # Flutter currently consumes board_ids as a single id string.
+                "board_ids": primary_board_id,
                 "data": {
                     "outfits": outfits,
                     "visual_intelligence": visual_intel,
                     "pipeline": _dict(outfit_result.get("pipeline")),
+                    "board_item_ids": board_item_ids,
                 },
                 "meta": {
                     "intent": intent,
                     "confidence": float(intent_row.get("confidence", 0.0)),
                     "visual_intelligence_enabled": True,
+                    "wardrobe_source": wardrobe_source,
+                    "wardrobe_count": len(wardrobe),
                 },
             }
 

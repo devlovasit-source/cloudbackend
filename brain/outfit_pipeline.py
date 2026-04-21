@@ -928,6 +928,14 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
     style_dna = context.get("style_dna", {}) or {}
     raw_wardrobe = user.get("wardrobe", {}) or {}
 
+    # Wardrobe can arrive as a dict wrapper from various callers; normalize early to avoid silent empty pipelines.
+    if isinstance(raw_wardrobe, dict):
+        for key in ("items", "documents", "wardrobe", "data"):
+            inner = raw_wardrobe.get(key)
+            if isinstance(inner, list):
+                raw_wardrobe = inner
+                break
+
     normalized = _normalize_wardrobe(raw_wardrobe)
     semantic_items, semantic_map = _semantic_retrieval(user_id=user_id, context=context)
     wardrobe = _merge_wardrobe(normalized, semantic_items)

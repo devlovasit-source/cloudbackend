@@ -189,6 +189,8 @@ def run_outfit_pipeline(request: OutfitPipelineRequest):
         outfits = result.get("outfits") if isinstance(result.get("outfits"), list) else []
         cards = result.get("cards") if isinstance(result.get("cards"), list) else []
         board_item_ids = result.get("board_item_ids") if isinstance(result.get("board_item_ids"), list) else []
+        board_item_ids = [str(x).strip() for x in board_item_ids if str(x).strip()]
+        primary_board_id = board_item_ids[0] if board_item_ids else ""
 
         if not outfits:
             return {
@@ -227,12 +229,14 @@ def run_outfit_pipeline(request: OutfitPipelineRequest):
             "board": "style",
             "type": "cards",
             "cards": cards,
-            "board_ids": ",".join([str(x).strip() for x in board_item_ids if str(x).strip()]),
+            # Flutter currently consumes board_ids as a single id string.
+            "board_ids": primary_board_id,
             "data": {
                 "outfits": outfits,
                 "visual_intelligence": visual_intelligence,
                 "pipeline": _dict(result.get("pipeline")),
                 "rendered_boards": rendered_boards,
+                "board_item_ids": board_item_ids,
             },
             "meta": {
                 "count": len(cards),

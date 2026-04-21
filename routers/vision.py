@@ -181,11 +181,14 @@ def _persist_vision_result(
         "segmented_png_base64": masked_png_b64,
     }
 
-    return persist_selected_items(
+    result = persist_selected_items(
         user_id=str(user_id or "demo_user"),
         selected_item_ids=[item_id],
         detected_items=[detected_item],
     )
+    if not bool(result.get("success")):
+        raise HTTPException(status_code=502, detail=str(result.get("error") or "save_failed"))
+    return result
 
 
 def _input_has_alpha(image_base64: str) -> bool:

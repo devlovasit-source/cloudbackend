@@ -2,13 +2,12 @@ import base64
 import os
 import re
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
 from services.embedding_service import embedding_service
 from services.qdrant_service import qdrant_service
-from services.r2_storage import R2Storage
 
 
 # =========================
@@ -25,8 +24,6 @@ HEADERS = {
     "X-Appwrite-Key": APPWRITE_API_KEY,
     "Content-Type": "application/json",
 }
-
-r2 = R2Storage()
 
 
 # =========================
@@ -46,33 +43,16 @@ def _appwrite_ready() -> bool:
 
 
 def _normalize_hex_color(value: str, default: str = "#000000") -> str:
-    """
-    Normalize a color into canonical '#RRGGBB' uppercase.
-    Accepts '#RGB', '#RRGGBB', 'RRGGBB', 'RGB'. Falls back to default.
-    """
     text = (value or "").strip()
     if not text:
         return default
     if text.startswith("#"):
         text = text[1:]
-    if len(text) == 3 and re.match(r"^[0-9a-fA-F]{3}$", text):
+    if len(text) == 3:
         text = "".join([c * 2 for c in text])
     if not _HEX6_RE.match(text):
         return default
     return f"#{text.upper()}"
-
-
-def _decode_base64(value: str) -> bytes:
-    text = (value or "").strip()
-    if not text:
-        return b""
-    if "," in text:
-        text = text.split(",", 1)[1]
-    try:
-        # validate=False keeps backward-compat with non-strict base64 payloads.
-        return base64.b64decode(text, validate=False)
-    except Exception:
-        return b""
 
 
 def _create_document(document_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,11 +60,17 @@ def _create_document(document_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         raise Exception("Appwrite not configured")
 
     url = f"{APPWRITE_ENDPOINT}/databases/{APPWRITE_DATABASE_ID}/collections/{APPWRITE_COLLECTION_ID}/documents"
-    payload = {"documentId": document_id, "data": data}
 
-    res = requests.post(url, json=payload, headers=HEADERS, timeout=20)
+    res = requests.post(
+        url,
+        json={"documentId": document_id, "data": data},
+        headers=HEADERS,
+        timeout=20,
+    )
+
     if res.status_code not in (200, 201):
         raise Exception(f"Appwrite error: {res.text}")
+
     return res.json()
 
 
@@ -92,158 +78,127 @@ def _create_document(document_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
 # CATEGORY NORMALIZATION
 # =========================
 CATEGORY_MAP = {
-    # Canonical categories match what the UI and vision pipeline use.
     "tops": "Tops",
-    "top": "Tops",
-    "t": "Tops",
     "bottoms": "Bottoms",
-    "bottom": "Bottoms",
-    "b": "Bottoms",
     "outerwear": "Outerwear",
-    "jacket": "Outerwear",
-    "jackets": "Outerwear",
     "dresses": "Dresses",
-    "dress": "Dresses",
     "footwear": "Footwear",
-    "shoes": "Footwear",
-    "sneakers": "Footwear",
     "bags": "Bags",
-    "bag": "Bags",
     "accessories": "Accessories",
-    "accessory": "Accessories",
     "jewelry": "Jewelry",
-    "jewellery": "Jewelry",
     "indian wear": "Indian Wear",
-    "ethnic": "Indian Wear",
 }
 
 
 def normalize_category(cat: str) -> str:
-    if not cat:
-        return "Tops"
-    return CATEGORY_MAP.get(str(cat).strip().lower(), "Tops")
+    return CATEGORY_MAP.get(str(cat).lower(), "Tops")
 
 
 # =========================
-# MAIN FUNCTION
+# MAIN FUNCTION (UPGRADED)
 # =========================
 def persist_selected_items(
     user_id: str,
     selected_item_ids: List[str],
     detected_items: List[Dict[str, Any]],
 ):
-    """
-    Pipeline:
-    - Upload to R2 (raw + masked PNG)
-    - Save document to Appwrite (if configured)
-    - Upsert vector + metadata to Qdrant (best-effort)
-    """
+    saved_items = []
+    skipped = 0
 
-    saved_items: List[Dict[str, Any]] = []
-    skipped_missing_data = 0
-    skipped_upload_failed = 0
-    persist_failures = 0
+    selected_ids = set(map(str, selected_item_ids or []))
 
-    selected_ids = set([str(x) for x in (selected_item_ids or [])])
-
-    for item in (detected_items or []):
-        if str(item.get("item_id") or "") not in selected_ids:
+    for item in detected_items or []:
+        if str(item.get("item_id")) not in selected_ids:
             continue
 
         try:
-            file_id = str(item.get("item_id") or "").strip() or str(uuid.uuid4())
+            file_id = str(item.get("item_id") or uuid.uuid4())
 
-            raw_bytes = _decode_base64(item.get("raw_crop_base64", ""))
-            mask_bytes = _decode_base64(item.get("segmented_png_base64", ""))
-            if not raw_bytes or not mask_bytes:
-                skipped_missing_data += 1
+            # -------------------------
+            # 🔥 NEW: URL-FIRST PIPELINE
+            # -------------------------
+            raw_url = item.get("raw_url") or item.get("image_url")
+            masked_url = item.get("masked_url")
+
+            if not masked_url:
+                skipped += 1
                 continue
 
-            upload_result = r2.upload_wardrobe_images(
-                file_id=file_id,
-                raw_image_bytes=raw_bytes,
-                masked_image_bytes=mask_bytes,
-            )
-            raw_url = upload_result.get("raw_image_url", "")
-            mask_url = upload_result.get("masked_image_url", "")
-            if not raw_url or not mask_url:
-                skipped_upload_failed += 1
-                continue
-
+            # -------------------------
+            # METADATA
+            # -------------------------
             category = normalize_category(item.get("category"))
-            sub_category = str(item.get("sub_category", "") or "Item").strip()
-            item_type_slug = sub_category.lower()
-            color = _normalize_hex_color(item.get("color_code", "#000000"))
-            pattern = str(item.get("pattern") or "plain").strip().lower() or "plain"
-            occasions = item.get("occasions", [])
-            if not isinstance(occasions, list):
-                occasions = []
+            sub_category = str(item.get("sub_category") or "Item")
+            item_type = sub_category.lower()
 
-            embedding = embedding_service.encode_text(f"{color} {item_type_slug} {category} {pattern}")
+            color = _normalize_hex_color(item.get("color_code"))
+            pattern = str(item.get("pattern") or "plain").lower()
+            occasions = item.get("occasions") or []
 
+            embedding = embedding_service.encode_text(
+                f"{color} {item_type} {category} {pattern}"
+            )
+
+            # -------------------------
+            # 🔥 UPDATED SCHEMA
+            # -------------------------
             doc = {
                 "userId": user_id,
                 "status": "active",
-                "image_url": raw_url,
-                "masked_url": mask_url,
+
+                # ✅ NEW FIELDS
+                "masked_url": masked_url,
+                "raw_url": raw_url,  # optional
+
                 "image_id": file_id,
                 "masked_id": file_id,
                 "qdrant_point_id": file_id,
+
                 "name": item.get("name", "Item"),
                 "category": category,
                 "sub_category": sub_category,
                 "color_code": color,
                 "pattern": pattern,
                 "occasions": occasions,
+
                 "worn": 0,
                 "liked": False,
             }
 
+            # -------------------------
+            # SAVE
+            # -------------------------
             if _appwrite_ready():
                 created = _create_document(file_id, doc)
             else:
-                # Dev fallback when Appwrite isn't configured.
                 created = {"$id": file_id, "data": doc}
 
+            # -------------------------
+            # QDRANT
+            # -------------------------
             try:
                 qdrant_service.upsert_wardrobe_item(
                     {
                         "id": file_id,
                         "userId": user_id,
-                        "type": item_type_slug,
+                        "type": item_type,
                         "category": category,
                         "color": color,
-                        "image_url": mask_url,
+                        "image_url": masked_url,
                         "embedding": embedding,
                     }
                 )
             except Exception as e:
-                # Keep persistence usable even if vector store is down.
-                print("[wardrobe.persist] qdrant error:", str(e))
+                print("[qdrant error]", e)
 
             saved_items.append(created)
 
         except Exception as e:
-            persist_failures += 1
-            print("[wardrobe.persist] persist error:", str(e))
-
-    if not saved_items:
-        return {
-            "success": False,
-            "saved_count": 0,
-            "items": [],
-            "error": "no_items_saved",
-            "skipped_missing_data": skipped_missing_data,
-            "skipped_upload_failed": skipped_upload_failed,
-            "persist_failures": persist_failures,
-        }
+            print("[persist error]", e)
 
     return {
-        "success": True,
+        "success": bool(saved_items),
         "saved_count": len(saved_items),
         "items": saved_items,
-        "skipped_missing_data": skipped_missing_data,
-        "skipped_upload_failed": skipped_upload_failed,
-        "persist_failures": persist_failures,
+        "skipped": skipped,
     }
-

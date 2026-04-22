@@ -194,24 +194,34 @@ class ResponseAssembler:
     # =========================
     def _build_visual_explanation(self, outfit, context):
 
-        items = outfit.get("items", []) if isinstance(outfit, dict) else []
-
-        if not items:
-            return "Clean and balanced look."
-
-        colors = [i.get("color") for i in items if i]
+        outfit = outfit if isinstance(outfit, dict) else {}
+        score_meta = outfit.get("score_meta") if isinstance(outfit.get("score_meta"), dict) else None
+        if score_meta is None:
+            score_meta = outfit.get("unified_style") if isinstance(outfit.get("unified_style"), dict) else {}
+        reasons = score_meta.get("reasons") if isinstance(score_meta.get("reasons"), list) else []
+        reasons = [str(r).strip().lower() for r in reasons if str(r).strip()]
 
         parts = []
 
-        if len(set(colors)) == 1:
-            parts.append("The monochrome palette keeps it sharp.")
-        else:
-            parts.append("The colors balance nicely without clashing.")
+        if any("palette aligned" in r for r in reasons):
+            parts.append("The colors work really well together.")
+
+        if any("clean aesthetic balance" in r for r in reasons):
+            parts.append("The overall silhouette feels balanced.")
+
+        if any("matches your style" in r for r in reasons):
+            parts.append("This fits your personal style nicely.")
+
+        if any("items pair well" in r for r in reasons):
+            parts.append("The pieces pair naturally without feeling forced.")
+
+        if not parts:
+            parts.append("This comes together cleanly.")
 
         if context.get("occasion"):
             parts.append(f"It works well for {context.get('occasion')}.")
 
-        return " ".join(parts)
+        return " ".join(parts).strip()
 
     def _bank_intelligence(self, outfit: dict, context: dict) -> str:
         """
@@ -280,16 +290,8 @@ class ResponseAssembler:
         return ""
 
     def _reaction(self, outfit: dict | None = None):
-        outfit = outfit or {}
-        unified = outfit.get("unified_style") if isinstance(outfit.get("unified_style"), dict) else {}
-        label = str(unified.get("label") or "").strip().lower()
-        if label == "excellent":
-            return "This is a hero-level look."
-        if label == "strong":
-            return "This is a strong look."
-        if label == "good":
-            return "This is a solid, wearable combo."
-        return "This is a clean starting point."
+        # Remove generic tone; let the intelligence-backed explanation carry the voice.
+        return ""
 
     def _closer(self):
         return "Want me to tweak it?"

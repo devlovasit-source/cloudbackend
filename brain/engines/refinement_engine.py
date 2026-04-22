@@ -45,6 +45,16 @@ class RefinementEngine:
                 items = []
 
             base_snapshot = self._unified_snapshot(items, context, graph)
+            try:
+                base_score = float(base_snapshot.get("score") or 0.0)
+            except Exception:
+                base_score = 0.0
+
+            # Prevent over-refinement: if already strong and no explicit mode requested, keep it.
+            if not mode and base_score >= 7.5:
+                new_outfit["unified_style_refinement"] = base_snapshot
+                refined_outfits.append(new_outfit)
+                continue
 
             # -------------------------
             # 1. CHIP TRANSFORMATION
@@ -72,6 +82,10 @@ class RefinementEngine:
                 style_dna=style_dna,
             )
 
+            # Weather-triggered practical fix.
+            if str((context.get("signals") or {}).get("weather_mode") or "").strip().lower() in ("hot", "summer", "heat", "warm"):
+                items = self._make_breathable(items)
+
             # -------------------------
             # 5. REAL WARDROBE SWAP
             # -------------------------
@@ -97,6 +111,19 @@ class RefinementEngine:
             refined_outfits.append(new_outfit)
 
         return refined_outfits
+
+    def _make_breathable(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Lightweight guidance: avoid heavy layering pieces when hot.
+        out = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            t = str(it.get("type") or "").lower()
+            if any(x in t for x in ["coat", "jacket", "outerwear", "blazer"]):
+                # Mark for swap to a lighter top instead of removing outright.
+                it["preferred_replacement"] = "top"
+            out.append(it)
+        return out
 
     def _unified_snapshot(self, items: List[Dict[str, Any]], context: Dict[str, Any], graph: Dict[str, Any]) -> Dict[str, Any]:
         try:

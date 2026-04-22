@@ -900,6 +900,27 @@ def _unified_style_snapshot(items: List[Dict[str, Any]], context: Dict[str, Any]
         return {"score": 0.0, "label": "Basic", "reasons": []}
 
 
+def _attach_score_meta(outfit: Dict[str, Any], context: Dict[str, Any]) -> None:
+    """
+    Backward/forward compatible contract:
+    - New: outfit['unified_style'] (dict)
+    - Legacy/phase-plan: outfit['score_meta'] (dict)
+    """
+    if not isinstance(outfit, dict):
+        return
+    items = outfit.get("refined_items") if isinstance(outfit.get("refined_items"), list) else outfit.get("items")
+    if not isinstance(items, list):
+        items = _flatten_outfit_items(outfit)
+        outfit["items"] = items
+    snapshot = _unified_style_snapshot(items, context)
+    outfit["unified_style"] = snapshot
+    outfit["score_meta"] = snapshot
+    try:
+        outfit["style_score"] = float(snapshot.get("score") or 0.0)
+    except Exception:
+        outfit["style_score"] = 0.0
+
+
 def _swap_part(outfit: Dict[str, Any], part: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
     updated = deepcopy(outfit)
     if not isinstance(candidate, dict) or not candidate:
@@ -1222,7 +1243,7 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
             scored_combo["master_piece"] = master_piece
             scored_combo["pipeline_tags"] = ["occasion_filtered", "master_piece", "llm_color", "llm_pattern", "accessories"]
             scored_combo["items"] = _flatten_outfit_items(scored_combo)
-            scored_combo["unified_style"] = _unified_style_snapshot(scored_combo["items"], merged_context)
+            _attach_score_meta(scored_combo, merged_context)
             scored.append(scored_combo)
 
         ranked = outfit_ranker.rank(user_id=user_id, outfits=scored, top_n=3)
@@ -1246,6 +1267,7 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
                     outfit["refined_items"] = refined_items
                     outfit["refinement_mode"] = refine_mode
                     outfit["unified_style_refined"] = _unified_style_snapshot(refined_items, merged_context)
+                    outfit["score_meta_refined"] = outfit["unified_style_refined"]
 
         # Closed-loop fix (weakness-aware): improve the best outfit by addressing the weakest dimension
         # and re-scoring. Keeps the system from being "one-shot".
@@ -1262,10 +1284,22 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 if isinstance(improved, dict) and improved:
                     improved["items"] = _flatten_outfit_items(improved)
-                    improved["unified_style"] = _unified_style_snapshot(improved["items"], merged_context)
+                    _attach_score_meta(improved, merged_context)
                     ranked[0] = improved
             except Exception:
                 pass
+
+        # Phase 4 plan: re-score after refinement and re-sort deterministically.
+        for outfit in ranked:
+            _attach_score_meta(outfit, merged_context)
+
+        ranked.sort(
+            key=lambda o: (
+                float(_dict(o.get("score_meta") or o.get("unified_style")).get("score") or 0.0),
+                float(o.get("rank_score", o.get("score", 0.0)) or 0.0),
+            ),
+            reverse=True,
+        )
 
         user_memory["recent_outfits"] = ranked + user_memory.get("recent_outfits", [])
         user_memory["recent_outfits"] = user_memory["recent_outfits"][:30]

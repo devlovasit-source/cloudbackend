@@ -12,9 +12,9 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
 )
+
 from services.image_fingerprint import hamming_distance_hex
 
-# Load env
 load_dotenv()
 
 
@@ -24,18 +24,15 @@ class QdrantService:
         self.url = os.getenv("QDRANT_URL")
         self.api_key = os.getenv("QDRANT_API_KEY")
 
-        # 🔥 LOCKED COLLECTIONS
+        # 🔥 COLLECTIONS (CLEANED)
         self.collection = os.getenv("QDRANT_COLLECTION", "wardrobe")
         self.memory_collection = os.getenv("QDRANT_MEMORY_COLLECTION", "outfit_memory")
-        # 384-d user preference memory (liked/disliked) used by brain/engines/memory_scorer.py
         self.user_memory_collection = os.getenv("QDRANT_USER_MEMORY_COLLECTION", "user_memory")
-        self.image_collection = os.getenv("QDRANT_IMAGE_COLLECTION", "wardrobe_image")
 
-        self.vector_size = 384
-        # 8-d outfit combo vectors used by brain/outfit_pipeline.py (keep small + fast)
+        # 🔥 HYBRID VECTOR (512)
+        self.vector_size = 512
         self.memory_vector_size = int(os.getenv("QDRANT_MEMORY_VECTOR_SIZE", "8"))
-        self.user_memory_vector_size = int(os.getenv("QDRANT_USER_MEMORY_VECTOR_SIZE", str(self.vector_size)))
-        self.image_vector_size = int(os.getenv("QDRANT_IMAGE_VECTOR_SIZE", "512"))
+        self.user_memory_vector_size = self.vector_size
 
         self.client = None
         self._initialized = False
@@ -58,7 +55,6 @@ class QdrantService:
         self._create_collection(self.collection, self.vector_size)
         self._create_collection(self.memory_collection, self.memory_vector_size)
         self._create_collection(self.user_memory_collection, self.user_memory_vector_size)
-        self._create_collection(self.image_collection, self.image_vector_size)
 
         self._initialized = True
 
@@ -87,53 +83,49 @@ class QdrantService:
         return bool(self.client)
 
     # =========================
-    # 🔥 MAIN UPSERT (GENERIC)
+    # UPSERT (MAIN)
     # =========================
     def upsert_item(self, item_id, vector, payload):
         if not self._ensure():
             return
 
-        try:
-            if not payload.get("userId"):
-                print("⚠️ Missing userId in payload")
+        if not vector or len(vector) != self.vector_size:
+            print("❌ Vector size mismatch:", len(vector))
+            return
 
+        payload["timestamp"] = time.time()
+
+        try:
             self.client.upsert(
                 collection_name=self.collection,
                 points=[
                     PointStruct(
                         id=item_id,
                         vector=vector,
-                        payload=payload
+                        payload=payload,
                     )
                 ],
             )
-
             print("✅ QDRANT UPSERT:", item_id)
 
         except Exception as e:
-            print("❌ Upsert item failed:", str(e))
+            print("❌ Upsert failed:", str(e))
 
     # =========================
-    # 🔥 WARDROBE HELPER (NEW)
+    # WARDROBE HELPER
     # =========================
     def upsert_wardrobe_item(self, item: dict):
-        """
-        Backward compatible helper
-        Allows both styles:
-        - upsert_item(...)
-        - upsert_wardrobe_item({...})
-        """
-
         try:
             self.upsert_item(
                 item_id=item["id"],
                 vector=item.get("embedding", [0.0] * self.vector_size),
                 payload={
                     "userId": item.get("userId"),
-                    "type": item.get("type"),
                     "category": item.get("category"),
-                    "color": item.get("color"),
+                    "sub_category": item.get("sub_category"),
+                    "color": item.get("color_code"),
                     "image_url": item.get("image_url"),
+                    "pixel_hash": item.get("pixel_hash"),
                 }
             )
         except Exception as e:
@@ -157,27 +149,30 @@ class QdrantService:
                     )
                 ],
             )
-
         except Exception as e:
             print("❌ Board upsert failed:", str(e))
 
     # =========================
-    # SEARCH
+    # SEARCH (FILTERED)
     # =========================
-    def search_similar(self, vector, user_id, limit=5):
-        if not self._ensure():
-            return []
-        if not vector:
+    def search_similar(self, vector, user_id, category=None, limit=5):
+        if not self._ensure() or not vector:
             return []
 
         try:
-            query_filter = Filter(
-                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
-            )
+            must = [
+                FieldCondition(key="userId", match=MatchValue(value=str(user_id)))
+            ]
+
+            if category:
+                must.append(FieldCondition(key="category", match=MatchValue(value=category)))
+
+            query_filter = Filter(must=must)
+
             results = self.client.search(
                 collection_name=self.collection,
                 query_vector=vector,
-                limit=max(1, int(limit)),
+                limit=limit,
                 query_filter=query_filter,
             )
 
@@ -191,34 +186,14 @@ class QdrantService:
             ]
 
         except Exception as e:
-            print("âŒ Search failed:", str(e))
+            print("❌ Search failed:", str(e))
             return []
 
-    def semantic_retrieve(self, query_vector, user_id, limit=40):
-        if not self._ensure():
-            return []
-        try:
-            query_filter = Filter(
-                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
-            )
-            results = self.client.search(
-                collection_name=self.collection,
-                query_vector=query_vector,
-                limit=max(1, int(limit)),
-                query_filter=query_filter,
-            )
-            return [
-                {
-                    "id": str(r.id),
-                    "score": float(r.score),
-                    "payload": r.payload or {},
-                }
-                for r in results
-            ]
-        except Exception:
-            return []
-
-        # Note: legacy duplicate block removed (it referenced an undefined `vector`).
+    # =========================
+    # SEMANTIC RETRIEVE
+    # =========================
+    def semantic_retrieve(self, vector, user_id, limit=40):
+        return self.search_similar(vector, user_id, None, limit)
 
     # =========================
     # BOARD SEARCH
@@ -249,7 +224,7 @@ class QdrantService:
             return []
 
     # =========================
-    # SCROLL ALL BOARDS
+    # SCROLL BOARDS
     # =========================
     def get_all_boards(self, limit=100):
         if not self._ensure():
@@ -311,192 +286,68 @@ class QdrantService:
             print("❌ Memory upsert failed:", str(e))
 
     # =========================
-    # USER MEMORY (LIKED/DISLIKED)
+    # USER MEMORY
     # =========================
-    def upsert_user_memory(
-        self,
-        *,
-        user_id: str,
-        vector,
-        memory_type: str,
-        payload: dict | None = None,
-        point_id: str | None = None,
-    ) -> str | None:
+    def upsert_user_memory(self, user_id, vector, payload):
         if not self._ensure():
             return None
-        if not vector:
-            return None
-
-        try:
-            if len(vector) != int(self.user_memory_vector_size):
-                print("❌ user_memory vector size mismatch:", len(vector), "expected", self.user_memory_vector_size)
-                return None
-        except Exception:
-            return None
-
-        mem_type = str(memory_type or "").strip().lower() or "liked"
-        pid = str(point_id or uuid.uuid4())
-        row = dict(payload or {})
-        row.setdefault("userId", str(user_id or ""))
-        row.setdefault("memory_type", mem_type)
-        row.setdefault("timestamp", float(time.time()))
 
         try:
             self.client.upsert(
                 collection_name=self.user_memory_collection,
-                points=[PointStruct(id=pid, vector=vector, payload=row)],
+                points=[
+                    PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=vector,
+                        payload=payload,
+                    )
+                ],
             )
-            return pid
         except Exception as e:
             print("❌ User memory upsert failed:", str(e))
-            return None
-
-    def search_user_memory(
-        self,
-        *,
-        user_id: str,
-        vector,
-        memory_type: str | None = None,
-        limit: int = 5,
-    ):
-        if not self._ensure():
-            return []
-        if not vector:
-            return []
-
-        try:
-            if len(vector) != int(self.user_memory_vector_size):
-                return []
-        except Exception:
-            return []
-
-        try:
-            must = [FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
-            if memory_type:
-                must.append(FieldCondition(key="memory_type", match=MatchValue(value=str(memory_type))))
-            query_filter = Filter(must=must)
-
-            results = self.client.search(
-                collection_name=self.user_memory_collection,
-                query_vector=vector,
-                limit=max(1, int(limit)),
-                query_filter=query_filter,
-                with_payload=True,
-            )
-
-            out = []
-            for r in results or []:
-                payload_row = getattr(r, "payload", None) or {}
-                out.append(
-                    {
-                        "id": str(getattr(r, "id", "") or ""),
-                        "score": float(getattr(r, "score", 0.0) or 0.0),
-                        "timestamp": payload_row.get("timestamp"),
-                        "payload": payload_row,
-                    }
-                )
-            return out
-        except Exception:
-            return []
 
     # =========================
-    # IMAGE VECTOR
+    # 🔥 PIXEL DUPLICATE (IMPORTANT)
     # =========================
-    def upsert_image_vector(self, point_id, vector, payload):
-        if not self._ensure():
-            return
-
-        try:
-            self.client.upsert(
-                collection_name=self.image_collection,
-                points=[PointStruct(id=point_id, vector=vector, payload=payload)],
-            )
-        except Exception as e:
-            print("❌ Image upsert failed:", str(e))
-
-    def find_image_duplicate(self, image_vector, user_id, threshold=0.985):
-        if not self._ensure() or not image_vector:
-            return {"checked": False, "is_duplicate": False, "id": None, "score": 0.0}
-        try:
-            query_filter = Filter(
-                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
-            )
-            results = self.client.search(
-                collection_name=self.image_collection,
-                query_vector=image_vector,
-                limit=1,
-                query_filter=query_filter,
-            )
-            if not results:
-                return {"checked": True, "is_duplicate": False, "id": None, "score": 0.0}
-            top = results[0]
-            score = float(getattr(top, "score", 0.0) or 0.0)
-            return {
-                "checked": True,
-                "is_duplicate": score >= float(threshold or 0.985),
-                "id": str(getattr(top, "id", "") or "") or None,
-                "score": score,
-            }
-        except Exception:
-            return {"checked": True, "is_duplicate": False, "id": None, "score": 0.0}
-
     def find_pixel_duplicate(self, user_id, pixel_hash, max_distance=6):
         if not self._ensure() or not pixel_hash:
-            return {"checked": False, "is_duplicate": False, "id": None, "distance": None}
+            return {"checked": False, "is_duplicate": False}
+
         try:
             query_filter = Filter(
                 must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
             )
+
             response = self.client.scroll(
                 collection_name=self.collection,
                 scroll_filter=query_filter,
                 limit=200,
                 with_payload=True,
-                with_vectors=False,
             )
+
             points = response[0] if isinstance(response, tuple) else []
-            best_id = None
-            best_distance = None
-            for point in points or []:
-                payload = getattr(point, "payload", {}) or {}
-                candidate_hash = str(payload.get("pixel_hash") or "")
+
+            for point in points:
+                payload = point.payload or {}
+                candidate_hash = payload.get("pixel_hash")
+
                 if not candidate_hash:
                     continue
-                distance = hamming_distance_hex(pixel_hash, candidate_hash)
-                if distance is None:
-                    continue
-                if best_distance is None or distance < best_distance:
-                    best_distance = distance
-                    best_id = str(getattr(point, "id", "") or "") or None
-            return {
-                "checked": True,
-                "is_duplicate": best_distance is not None and int(best_distance) <= int(max_distance),
-                "id": best_id,
-                "distance": best_distance,
-            }
+
+                dist = hamming_distance_hex(pixel_hash, candidate_hash)
+
+                if dist is not None and dist <= max_distance:
+                    return {
+                        "checked": True,
+                        "is_duplicate": True,
+                        "id": str(point.id),
+                        "distance": dist,
+                    }
+
+            return {"checked": True, "is_duplicate": False}
+
         except Exception:
-            return {"checked": True, "is_duplicate": False, "id": None, "distance": None}
-
-    # =========================
-    # COSINE SIMILARITY
-    # =========================
-    @staticmethod
-    def cosine_similarity(vec1, vec2):
-        try:
-            import numpy as np
-
-            v1 = np.array(vec1)
-            v2 = np.array(vec2)
-
-            if v1.size == 0 or v2.size == 0:
-                return 0.0
-
-            return float(
-                np.dot(v1, v2)
-                / (np.linalg.norm(v1) * np.linalg.norm(v2))
-            )
-        except Exception:
-            return 0.0
+            return {"checked": True, "is_duplicate": False}
 
     # =========================
     # STATUS
@@ -506,8 +357,7 @@ class QdrantService:
             "enabled": bool(self.client),
             "initialized": self._initialized,
             "collection": self.collection,
-            "memory_collection": self.memory_collection,
-            "image_collection": self.image_collection,
+            "vector_size": self.vector_size,
         }
 
 

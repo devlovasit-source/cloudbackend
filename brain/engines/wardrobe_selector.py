@@ -1,5 +1,8 @@
 
 from typing import List, Dict, Any, Optional
+
+from brain.engines.color_normalizer import color_normalizer
+from brain.engines.styling.palette_engine import palette_engine
 from services.qdrant_service import qdrant_service
 
 
@@ -33,7 +36,17 @@ class WardrobeSelector:
 
         "shoes": "footwear",
         "sneakers": "footwear",
+        "loafers": "footwear",
+        "heels": "footwear",
+        "boots": "footwear",
+        "sandals": "footwear",
         "footwear": "footwear",
+
+        "dress": "dress",
+        "dresses": "dress",
+        "outerwear": "outerwear",
+        "jacket": "outerwear",
+        "coat": "outerwear",
     }
 
     def normalize_type(self, t: str) -> str:
@@ -50,6 +63,8 @@ class WardrobeSelector:
         target_type: str,
         context: Dict[str, Any],
         reference_embedding: Optional[List[float]] = None,
+        preferred_colors: Optional[List[str]] = None,
+        require_occasion: str | None = None,
     ) -> Optional[Dict]:
 
         wardrobe = context.get("wardrobe", [])
@@ -58,15 +73,40 @@ class WardrobeSelector:
             return None
 
         target_type = self.normalize_type(target_type)
+        occasion = str(require_occasion or context.get("occasion") or "").strip().lower()
+
+        # Palette-aware preferred colors (deterministic).
+        palette_colors: List[str] = []
+        try:
+            palette = palette_engine.select_palette(
+                {
+                    "event": occasion or None,
+                    "microtheme": (context.get("style_dna") or {}).get("primary_aesthetic"),
+                }
+            )
+            palette_colors = [color_normalizer.normalize(c) for c in (palette.get("hex") or []) if c]
+        except Exception:
+            palette_colors = []
+
+        preferred_norm = [color_normalizer.normalize(c) for c in (preferred_colors or []) if c]
 
         # -------------------------
         # FILTER BY TYPE (SMART)
         # -------------------------
-        candidates = [
-            w for w in wardrobe
-            if target_type in self.normalize_type(str(w.get("type", "")))
-               or target_type in self.normalize_type(str(w.get("category", "")))
-        ]
+        def _get_item_type(row: Dict[str, Any]) -> str:
+            return self.normalize_type(str(row.get("type") or row.get("sub_category") or ""))
+
+        def _get_item_category(row: Dict[str, Any]) -> str:
+            return self.normalize_type(str(row.get("category") or ""))
+
+        candidates = []
+        for w in wardrobe:
+            if not isinstance(w, dict):
+                continue
+            item_type = _get_item_type(w)
+            item_cat = _get_item_category(w)
+            if target_type and (target_type in item_type or target_type in item_cat):
+                candidates.append(w)
 
         if not candidates:
             print(f"⚠️ No candidates for type: {target_type}")
@@ -98,6 +138,24 @@ class WardrobeSelector:
             # slight preference for items with embeddings
             if item.get("embedding"):
                 score += 0.05
+
+            # Occasion match (when tags exist)
+            if occasion:
+                tags = item.get("occasion_tags") or item.get("occasions") or []
+                if isinstance(tags, list):
+                    tags_norm = [str(t).strip().lower() for t in tags if str(t).strip()]
+                    if occasion in tags_norm:
+                        score += 0.18
+
+            # Palette / preferred color match (light boost)
+            color_raw = item.get("color") or item.get("color_code") or ""
+            color = color_normalizer.normalize(str(color_raw))
+            if preferred_norm and color in preferred_norm:
+                score += 0.22
+            elif palette_colors and color in palette_colors:
+                score += 0.12
+            elif color in ["black", "white", "grey", "gray", "beige", "navy", "cream"]:
+                score += 0.06
 
             scored.append({
                 "item": item,

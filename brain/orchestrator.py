@@ -6,6 +6,8 @@ from typing import Any, Dict, List
 
 from brain.daily_dependency_engine import build_daily_dependency_response
 from brain.engines.fitness.fitness_engine import fitness_engine
+from brain.engines.proactive_engine import proactive_engine
+from brain.intelligence.bank_snippets import color_harmony_snippet, weather_overlay_snippet
 from brain.intent_engine import detect_intent
 from brain.outfit_pipeline import get_daily_outfits
 from brain.plan_pack_flow import build_plan_pack_response
@@ -286,7 +288,17 @@ class AhviOrchestrator:
         query = _safe_text(text)
         uid = _safe_text(user_id) or _safe_text(_dict(context).get("user_id")) or "user_1"
         ctx = _normalize_weather_context(_dict(context))
+        ctx["user_id"] = uid  # used by memory scoring + downstream engines
         user_profile = _dict(ctx.get("user_profile"))
+
+        # Proactive signals: enrich "signals" deterministically so downstream engines can use them.
+        try:
+            ctx = proactive_engine.inject(ctx)
+        except Exception as exc:
+            logger.warning("proactive_engine.inject failed: %s", str(exc))
+        signals = _dict(ctx.get("signals"))
+        proactive_signals = _dict(ctx.get("proactive_signals"))
+        ctx["signals"] = {**signals, **proactive_signals}
 
         intent_row = detect_intent(query, history=(ctx.get("history") or []))
         intent = _safe_text(intent_row.get("intent")).lower() or "general"
@@ -395,6 +407,30 @@ class AhviOrchestrator:
                 message = "Your visual intelligence result is ready."
 
             first_outfit = _dict(outfits[0]) if outfits else {}
+            # Make the surface layer reflect the real intelligence:
+            # pull deterministic bank snippets + scorer reasons into the message.
+            try:
+                board_item_ids_for_key = outfit_result.get("board_item_ids") if isinstance(outfit_result.get("board_item_ids"), list) else []
+                stable_key = "|".join([str(x).strip() for x in board_item_ids_for_key if str(x).strip()]) or str(first_outfit.get("combo_id") or "outfit")
+
+                breakdown = _dict(first_outfit.get("score_breakdown"))
+                color_hint = float(breakdown.get("color_intelligence") or 0.0)
+                weather_mode = _safe_text(_dict(ctx.get("signals")).get("weather_mode") or ctx.get("weather") or "")
+
+                harmony_line = color_harmony_snippet(color_hint, key=stable_key)
+                weather_line = weather_overlay_snippet(weather_mode, key=stable_key) if weather_mode else ""
+
+                unified = _dict(first_outfit.get("unified_style"))
+                reasons = unified.get("reasons") if isinstance(unified.get("reasons"), list) else []
+                reason_line = ""
+                if reasons:
+                    reason_line = "Why it works: " + ", ".join([_safe_text(r) for r in reasons if _safe_text(r)][:2]) + "."
+
+                extra_lines = " ".join([x for x in [harmony_line, weather_line, reason_line] if x])
+                if extra_lines:
+                    message = (message.rstrip(".") + ". " + extra_lines).strip()
+            except Exception:
+                pass
             toned = tone_engine.apply(
                 message,
                 user_profile=user_profile,

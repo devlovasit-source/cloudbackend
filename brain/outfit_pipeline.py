@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Tuple
 from brain.engines.styling.style_builder import style_engine
 from brain.ml.outfit_ranker import outfit_ranker
 from brain.engines.style_graph_engine import style_graph_engine
+from brain.engines.style_scorer import style_scorer
+from brain.engines.refinement_engine import refinement_engine
+from brain.engines.wardrobe_selector import wardrobe_selector
 from services import ai_gateway
 from services.appwrite_proxy import AppwriteProxy
 from services.embedding_service import get_model
@@ -871,17 +874,40 @@ def _build_tryon_payload(outfit: Dict[str, Any], context: Dict[str, Any]) -> Dic
     return payload
 
 
+def _flatten_outfit_items(outfit: Dict[str, Any]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    if not isinstance(outfit, dict):
+        return items
+
+    for part in ("master_piece", "top", "bottom", "dress", "shoes", "outerwear"):
+        value = outfit.get(part, {}) or {}
+        if isinstance(value, dict) and value:
+            items.append(value)
+
+    accessories = outfit.get("accessories") or []
+    if isinstance(accessories, list):
+        items.extend([x for x in accessories if isinstance(x, dict)])
+
+    return items
+
+
+def _unified_style_snapshot(items: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        graph = context.get("style_graph", {}) or {}
+        return style_scorer.score_outfit(items=items, context=context, graph=graph)
+    except Exception:
+        return {"score": 0.0, "label": "Basic", "reasons": []}
+
+
 def _build_cards(outfits: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
     cards: List[Dict[str, Any]] = []
     for idx, outfit in enumerate(outfits):
         story = _generate_story(outfit, context)
         tryon_payload = _build_tryon_payload(outfit, context)
-        items = []
-        for part in ("top", "bottom", "dress", "shoes", "outerwear"):
-            value = outfit.get(part, {}) or {}
-            if value:
-                items.append(value)
-        items.extend([x for x in (outfit.get("accessories") or []) if isinstance(x, dict)])
+        # Prefer refined_items when present (closed-loop refinement pass), otherwise use the flattened outfit items.
+        items = outfit.get("refined_items") if isinstance(outfit.get("refined_items"), list) else None
+        if items is None:
+            items = _flatten_outfit_items(outfit)
         cards.append(
             {
                 "id": f"outfit_card_{idx + 1}",
@@ -1081,9 +1107,31 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
             scored_combo["master_type"] = master_type
             scored_combo["master_piece"] = master_piece
             scored_combo["pipeline_tags"] = ["occasion_filtered", "master_piece", "llm_color", "llm_pattern", "accessories"]
+            scored_combo["items"] = _flatten_outfit_items(scored_combo)
+            scored_combo["unified_style"] = _unified_style_snapshot(scored_combo["items"], merged_context)
             scored.append(scored_combo)
 
         ranked = outfit_ranker.rank(user_id=user_id, outfits=scored, top_n=3)
+
+        # Closed-loop (lightweight): if a refinement is requested (or suggested proactively),
+        # run a deterministic refinement pass and re-score using the UnifiedStyleScorer.
+        refine_mode = str(context.get("refinement") or (context.get("signals") or {}).get("default_refinement") or (context.get("signals") or {}).get("auto_refinement") or "").strip().lower()
+        if refine_mode:
+            merged_context["refinement"] = refine_mode
+            merged_context["wardrobe"] = wardrobe
+            try:
+                refined = refinement_engine.apply(outfits=ranked, context=merged_context) or ranked
+            except Exception:
+                refined = ranked
+
+            for idx, outfit in enumerate(ranked):
+                refined_items = []
+                if isinstance(refined, list) and idx < len(refined) and isinstance(refined[idx], dict):
+                    refined_items = refined[idx].get("items") if isinstance(refined[idx].get("items"), list) else []
+                if refined_items:
+                    outfit["refined_items"] = refined_items
+                    outfit["refinement_mode"] = refine_mode
+                    outfit["unified_style_refined"] = _unified_style_snapshot(refined_items, merged_context)
 
         user_memory["recent_outfits"] = ranked + user_memory.get("recent_outfits", [])
         user_memory["recent_outfits"] = user_memory["recent_outfits"][:30]

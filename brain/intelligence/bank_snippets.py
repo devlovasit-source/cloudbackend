@@ -76,3 +76,23 @@ def weather_overlay_snippet(weather_mode: str, *, key: str) -> str:
     else:
         category = "mild_weather"
     return pick_bank_phrase(bank_path=bank_path, category=category, key=key)
+
+
+def print_pattern_snippet(patterns: List[str], *, key: str) -> str:
+    bank_path = os.path.join(_brain_dir(), "banks", "foundational", "print_pattern_bank_v1.json")
+    pats = [str(p or "").strip().lower() for p in (patterns or []) if str(p or "").strip()]
+    non_plain = [p for p in pats if p not in ("plain", "solid", "none")]
+    unique = sorted(set(non_plain))
+    if not unique:
+        return ""
+    if len(unique) >= 2:
+        category = "constructive_print_clash_or_busy"
+    else:
+        category = "positive_print_harmony"
+    return pick_bank_phrase(bank_path=bank_path, category=category, key=key)
+
+
+def silhouette_snippet(score_hint: float, *, key: str) -> str:
+    bank_path = os.path.join(_brain_dir(), "banks", "foundational", "silhouette_proportion_bank.json")
+    category = "positive_balanced" if score_hint >= 0.6 else "constructive_slightly_off"
+    return pick_bank_phrase(bank_path=bank_path, category=category, key=key)

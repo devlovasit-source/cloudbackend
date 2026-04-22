@@ -13,6 +13,7 @@ from brain.engines.style_graph_engine import style_graph_engine
 from brain.engines.style_scorer import style_scorer
 from brain.engines.refinement_engine import refinement_engine
 from brain.engines.wardrobe_selector import wardrobe_selector
+from brain.engines.styling.palette_engine import palette_engine
 from services import ai_gateway
 from services.appwrite_proxy import AppwriteProxy
 from services.embedding_service import get_model
@@ -899,6 +900,119 @@ def _unified_style_snapshot(items: List[Dict[str, Any]], context: Dict[str, Any]
         return {"score": 0.0, "label": "Basic", "reasons": []}
 
 
+def _swap_part(outfit: Dict[str, Any], part: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
+    updated = deepcopy(outfit)
+    if not isinstance(candidate, dict) or not candidate:
+        return updated
+    updated[part] = dict(candidate)
+    return updated
+
+
+def _closed_loop_fix(
+    outfit: Dict[str, Any],
+    *,
+    context: Dict[str, Any],
+    wardrobe: List[Dict[str, Any]],
+    user_memory: Dict[str, Any],
+    rules: Dict[str, Any],
+    semantic_map: Dict[str, float],
+) -> Dict[str, Any]:
+    """
+    Closed-loop improvement: score -> identify weakness -> swap 1 part -> re-score.
+    Deterministic, bounded (max 2 swaps).
+    """
+    if not isinstance(outfit, dict) or not wardrobe:
+        return outfit
+
+    occasion = str(context.get("occasion") or "").strip().lower()
+    style_dna = context.get("style_dna", {}) or {}
+
+    palette_hexes: List[str] = []
+    try:
+        palette = palette_engine.select_palette(
+            {"event": occasion or None, "microtheme": style_dna.get("primary_aesthetic")}
+        )
+        palette_hexes = [str(x).strip() for x in (palette.get("hex") or []) if str(x).strip()]
+    except Exception:
+        palette_hexes = []
+
+    preferred_colors = []
+    if isinstance(style_dna.get("preferred_colors"), list):
+        preferred_colors.extend([str(x).strip() for x in style_dna.get("preferred_colors") if str(x).strip()])
+    preferred_colors.extend(palette_hexes)
+
+    current = dict(outfit)
+
+    def _score(o: Dict[str, Any]) -> float:
+        try:
+            return float(o.get("score") or 0.0)
+        except Exception:
+            return 0.0
+
+    for _ in range(2):
+        breakdown = current.get("score_breakdown") if isinstance(current.get("score_breakdown"), dict) else {}
+        try:
+            color_intel = float(breakdown.get("color_intelligence") or 0.0)
+        except Exception:
+            color_intel = 0.0
+        try:
+            occ_rules = float(breakdown.get("occasion_rules") or 0.0)
+        except Exception:
+            occ_rules = 0.0
+        try:
+            layering = float(breakdown.get("layering") or 0.0)
+        except Exception:
+            layering = 0.0
+
+        # Pick a deterministic weakness priority.
+        weakness = "color" if color_intel < 0.5 else ("occasion" if occ_rules < 0.5 else ("layering" if layering < 0.2 else ""))
+        if not weakness:
+            break
+
+        master_type = str(current.get("master_type") or "").strip().lower()
+        parts = ["shoes"]
+        if master_type == "dress" or current.get("dress"):
+            parts = ["dress", "shoes"]
+        else:
+            parts = ["top", "bottom", "shoes"]
+
+        candidate_outfit = None
+        for part in parts:
+            target_type = "footwear" if part == "shoes" else ("dress" if part == "dress" else ("top" if part == "top" else "bottom"))
+
+            if weakness == "layering" and part in ("top", "bottom", "dress", "shoes"):
+                continue
+
+            candidate = wardrobe_selector.find_best_match(
+                target_type,
+                {**context, "wardrobe": wardrobe},
+                preferred_colors=preferred_colors if weakness in ("color", "occasion") else None,
+                require_occasion=occasion if weakness == "occasion" else None,
+            )
+            if not candidate:
+                continue
+
+            swapped = _swap_part(current, part, candidate)
+            swapped["items"] = _flatten_outfit_items(swapped)
+            swapped["unified_style"] = _unified_style_snapshot(swapped["items"], context)
+
+            # Re-score via the pipeline scorer (keeps consistency with ranking features).
+            try:
+                swapped = score_outfit(swapped, context, user_memory, rules, semantic_map)
+            except Exception:
+                pass
+
+            if _score(swapped) >= _score(current) + 0.15:
+                candidate_outfit = swapped
+                break
+
+        if candidate_outfit is None:
+            break
+        current = candidate_outfit
+
+    return current
+
+
 def _build_cards(outfits: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
     cards: List[Dict[str, Any]] = []
     for idx, outfit in enumerate(outfits):
@@ -1132,6 +1246,26 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
                     outfit["refined_items"] = refined_items
                     outfit["refinement_mode"] = refine_mode
                     outfit["unified_style_refined"] = _unified_style_snapshot(refined_items, merged_context)
+
+        # Closed-loop fix (weakness-aware): improve the best outfit by addressing the weakest dimension
+        # and re-scoring. Keeps the system from being "one-shot".
+        if ranked and bool(os.getenv("ENABLE_CLOSED_LOOP_FIX", "true").lower() in ("1", "true", "yes", "on")):
+            try:
+                best0 = ranked[0]
+                improved = _closed_loop_fix(
+                    best0,
+                    context=merged_context,
+                    wardrobe=wardrobe,
+                    user_memory=user_memory,
+                    rules=rules,
+                    semantic_map=semantic_map,
+                )
+                if isinstance(improved, dict) and improved:
+                    improved["items"] = _flatten_outfit_items(improved)
+                    improved["unified_style"] = _unified_style_snapshot(improved["items"], merged_context)
+                    ranked[0] = improved
+            except Exception:
+                pass
 
         user_memory["recent_outfits"] = ranked + user_memory.get("recent_outfits", [])
         user_memory["recent_outfits"] = user_memory["recent_outfits"][:30]

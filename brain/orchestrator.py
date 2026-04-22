@@ -7,7 +7,12 @@ from typing import Any, Dict, List
 from brain.daily_dependency_engine import build_daily_dependency_response
 from brain.engines.fitness.fitness_engine import fitness_engine
 from brain.engines.proactive_engine import proactive_engine
-from brain.intelligence.bank_snippets import color_harmony_snippet, weather_overlay_snippet
+from brain.intelligence.bank_snippets import (
+    color_harmony_snippet,
+    weather_overlay_snippet,
+    print_pattern_snippet,
+    silhouette_snippet,
+)
 from brain.intent_engine import detect_intent
 from brain.outfit_pipeline import get_daily_outfits
 from brain.plan_pack_flow import build_plan_pack_response
@@ -415,10 +420,19 @@ class AhviOrchestrator:
 
                 breakdown = _dict(first_outfit.get("score_breakdown"))
                 color_hint = float(breakdown.get("color_intelligence") or 0.0)
+                silhouette_hint = float(breakdown.get("style_graph") or 0.0)
                 weather_mode = _safe_text(_dict(ctx.get("signals")).get("weather_mode") or ctx.get("weather") or "")
 
                 harmony_line = color_harmony_snippet(color_hint, key=stable_key)
                 weather_line = weather_overlay_snippet(weather_mode, key=stable_key) if weather_mode else ""
+
+                # Print + silhouette banks
+                items_for_patterns = first_outfit.get("refined_items") if isinstance(first_outfit.get("refined_items"), list) else first_outfit.get("items")
+                patterns = []
+                if isinstance(items_for_patterns, list):
+                    patterns = [str(_dict(x).get("pattern") or "").strip().lower() for x in items_for_patterns if _dict(x)]
+                print_line = print_pattern_snippet(patterns, key=stable_key)
+                silhouette_line = silhouette_snippet(silhouette_hint, key=stable_key)
 
                 unified = _dict(first_outfit.get("unified_style"))
                 reasons = unified.get("reasons") if isinstance(unified.get("reasons"), list) else []
@@ -426,7 +440,7 @@ class AhviOrchestrator:
                 if reasons:
                     reason_line = "Why it works: " + ", ".join([_safe_text(r) for r in reasons if _safe_text(r)][:2]) + "."
 
-                extra_lines = " ".join([x for x in [harmony_line, weather_line, reason_line] if x])
+                extra_lines = " ".join([x for x in [harmony_line, print_line, silhouette_line, weather_line, reason_line] if x])
                 if extra_lines:
                     message = (message.rstrip(".") + ". " + extra_lines).strip()
             except Exception:

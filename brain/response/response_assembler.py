@@ -9,6 +9,12 @@ from services.llm_service import (
     generate_style_advice,
     generate_followup_suggestions,
 )
+from brain.intelligence.bank_snippets import (
+    color_harmony_snippet,
+    weather_overlay_snippet,
+    print_pattern_snippet,
+    silhouette_snippet,
+)
 
 logger = logging.getLogger("ahvi.response_assembler")
 
@@ -47,9 +53,12 @@ class ResponseAssembler:
         signals = context.get("signals", {})
 
         # -------------------------
-        # BASE VISUAL TEXT
+        # BASE VISUAL TEXT (deterministic + intelligence-backed)
         # -------------------------
         base_text = self._build_visual_explanation(outfits[0], context)
+        bank_text = self._bank_intelligence(outfits[0], context)
+        if bank_text:
+            base_text = f"{base_text} {bank_text}".strip()
 
         # -------------------------
         # LLM ENHANCEMENT
@@ -77,7 +86,7 @@ class ResponseAssembler:
         # -------------------------
         message = self._compose([
             self._proactive_prefix(signals),
-            self._reaction(),
+            self._reaction(outfits[0]),
             base_text,
             self._closer()
         ])
@@ -204,6 +213,53 @@ class ResponseAssembler:
 
         return " ".join(parts)
 
+    def _bank_intelligence(self, outfit: dict, context: dict) -> str:
+        """
+        Surface the system's intelligence deterministically (no LLM required):
+        - color harmony bank
+        - print/pattern bank
+        - silhouette bank
+        - weather overlay bank
+        - scorer reasons when present
+        """
+        try:
+            outfit = outfit if isinstance(outfit, dict) else {}
+            stable_key = str(outfit.get("combo_id") or outfit.get("id") or "outfit")
+
+            items = outfit.get("refined_items") if isinstance(outfit.get("refined_items"), list) else outfit.get("items")
+            if not isinstance(items, list):
+                items = []
+
+            patterns = [str((i or {}).get("pattern") or "").strip().lower() for i in items if isinstance(i, dict)]
+
+            breakdown = outfit.get("score_breakdown") if isinstance(outfit.get("score_breakdown"), dict) else {}
+            try:
+                color_hint = float(breakdown.get("color_intelligence") or 0.0)
+            except Exception:
+                color_hint = 0.0
+            try:
+                silhouette_hint = float(breakdown.get("style_graph") or 0.0)
+            except Exception:
+                silhouette_hint = 0.0
+
+            signals = context.get("signals", {}) or {}
+            weather_mode = str(signals.get("weather_mode") or context.get("weather") or "").strip().lower()
+
+            harmony_line = color_harmony_snippet(color_hint, key=stable_key)
+            print_line = print_pattern_snippet(patterns, key=stable_key)
+            silhouette_line = silhouette_snippet(silhouette_hint, key=stable_key)
+            weather_line = weather_overlay_snippet(weather_mode, key=stable_key) if weather_mode else ""
+
+            unified = outfit.get("unified_style") if isinstance(outfit.get("unified_style"), dict) else {}
+            reasons = unified.get("reasons") if isinstance(unified.get("reasons"), list) else []
+            reason_line = ""
+            if reasons:
+                reason_line = "Why it works: " + ", ".join([str(r).strip() for r in reasons if str(r).strip()][:2]) + "."
+
+            return " ".join([x for x in [harmony_line, print_line, silhouette_line, weather_line, reason_line] if x]).strip()
+        except Exception:
+            return ""
+
     # =========================
     # 🧩 HELPERS
     # =========================
@@ -223,8 +279,17 @@ class ResponseAssembler:
             return "This fits your evening."
         return ""
 
-    def _reaction(self):
-        return "This is a strong look."
+    def _reaction(self, outfit: dict | None = None):
+        outfit = outfit or {}
+        unified = outfit.get("unified_style") if isinstance(outfit.get("unified_style"), dict) else {}
+        label = str(unified.get("label") or "").strip().lower()
+        if label == "excellent":
+            return "This is a hero-level look."
+        if label == "strong":
+            return "This is a strong look."
+        if label == "good":
+            return "This is a solid, wearable combo."
+        return "This is a clean starting point."
 
     def _closer(self):
         return "Want me to tweak it?"

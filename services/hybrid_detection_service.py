@@ -6,52 +6,75 @@ from typing import List, Dict
 import torch
 import numpy as np
 from PIL import Image
-from transformers import OwlViTProcessor, OwlViTForObjectDetection
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 import mediapipe as mp
 
-from services.bg_service import remove_bg_external
+from services.bg_service import remove_bg_bytes
 from services.r2_storage import R2Storage
 
 
 # =========================
-# INIT (LOAD ONCE)
+# CONFIG
 # =========================
-processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
-model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-
-mp_face = mp.solutions.face_mesh
-mp_pose = mp.solutions.pose
+MAX_ITEMS = 5
+RESIZE_LIMIT = 640
 
 
 # =========================
-# QUERIES (INDIAN + WESTERN)
+# INIT MODEL (GROUNDING DINO TINY)
 # =========================
-ALL_QUERIES = [[
-    "t-shirt", "shirt", "jacket", "hoodie",
-    "dress", "jeans", "pants", "skirt",
-    "saree", "lehenga", "kurta", "dupatta",
-    "watch", "belt", "bracelet", "necklace", "earring"
-]]
+device = torch.device("cpu")
+
+processor = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny")
+model = AutoModelForZeroShotObjectDetection.from_pretrained(
+    "IDEA-Research/grounding-dino-tiny"
+)
+
+model.to(device)
+model.eval()
+
+
+TEXT_PROMPT = "shirt . pants . dress . saree . kurta . watch ."
 
 
 # =========================
-# DETECTION (SINGLE PASS)
+# RESIZE
+# =========================
+def resize_image(image: Image.Image):
+    w, h = image.size
+    if max(w, h) <= RESIZE_LIMIT:
+        return image
+
+    scale = RESIZE_LIMIT / max(w, h)
+    return image.resize((int(w * scale), int(h * scale)))
+
+
+# =========================
+# DETECTION (DINO)
 # =========================
 def detect_items(image: Image.Image):
-    inputs = processor(text=ALL_QUERIES, images=image, return_tensors="pt")
-    outputs = model(**inputs)
+    inputs = processor(images=image, text=TEXT_PROMPT, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    target_sizes = torch.tensor([image.size[::-1]])
-    results = processor.post_process(outputs, target_sizes=target_sizes)[0]
+    with torch.inference_mode():
+        outputs = model(**inputs)
+
+    results = processor.post_process_object_detection(
+        outputs,
+        threshold=0.35,
+        target_sizes=[image.size[::-1]]
+    )[0]
 
     detections = []
-    for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
-        if score < 0.25:
-            continue
 
+    for score, label, box in zip(
+        results["scores"],
+        results["labels"],
+        results["boxes"]
+    ):
         detections.append({
-            "label": ALL_QUERIES[0][label],
+            "label": processor.tokenizer.decode([label]).strip(),
             "bbox": box.tolist(),
             "score": float(score)
         })
@@ -60,8 +83,12 @@ def detect_items(image: Image.Image):
 
 
 # =========================
-# MEDIAPIPE REGIONS
+# MEDIAPIPE
 # =========================
+mp_face = mp.solutions.face_mesh
+mp_pose = mp.solutions.pose
+
+
 def get_regions(image_np):
     h, w, _ = image_np.shape
     regions = []
@@ -88,10 +115,26 @@ def get_regions(image_np):
 
 
 # =========================
-# FILTER
+# IOU DEDUP
 # =========================
-def filter_boxes(detections, width, height):
-    out = []
+def iou(box1, box2):
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    union = area1 + area2 - inter
+    return inter / union if union else 0
+
+
+def filter_and_limit(detections, width, height):
+    filtered = []
+
     for d in detections:
         x1, y1, x2, y2 = map(int, d["bbox"])
 
@@ -102,62 +145,91 @@ def filter_boxes(detections, width, height):
         if area > 0.9 * width * height:
             continue
 
-        out.append(d)
+        duplicate = False
+        for f in filtered:
+            if iou(f["bbox"], d["bbox"]) > 0.7:
+                duplicate = True
+                break
 
-    return out
+        if not duplicate:
+            filtered.append(d)
+
+    filtered.sort(key=lambda x: x["score"], reverse=True)
+    return filtered[:MAX_ITEMS]
 
 
 # =========================
-# PROCESS ITEM
+# BATCH BG REMOVAL
 # =========================
-async def process_crop(image, bbox, label, r2):
-    x1, y1, x2, y2 = map(int, bbox)
-
-    crop = image.crop((x1, y1, x2, y2))
-
-    buf = io.BytesIO()
-    crop.save(buf, format="JPEG")
-    raw_bytes = buf.getvalue()
-
-    loop = asyncio.get_event_loop()
-    masked_bytes = await loop.run_in_executor(None, remove_bg_external, raw_bytes)
-
-    file_id = str(uuid.uuid4())
-
-    upload = r2.upload_wardrobe_images(
-        file_id=file_id,
-        raw_image_bytes=raw_bytes,
-        masked_image_bytes=masked_bytes
+async def batch_bg(crops):
+    return await asyncio.gather(
+        *[asyncio.to_thread(remove_bg_bytes, c) for c in crops]
     )
-
-    return {
-        "item_id": file_id,
-        "label": label,
-        "raw_url": upload["raw_image_url"],
-        "masked_url": upload["masked_image_url"]
-    }
 
 
 # =========================
 # MAIN PIPELINE
 # =========================
 async def run_hybrid_detection(image: Image.Image):
+    image = resize_image(image)
+
     width, height = image.size
     image_np = np.array(image)
 
     r2 = R2Storage()
 
+    # -------------------------
+    # DETECTION
+    # -------------------------
     detections = detect_items(image)
-    detections = filter_boxes(detections, width, height)
+    detections = filter_and_limit(detections, width, height)
 
-    # add mediapipe regions
+    # add mediapipe
     detections.extend(get_regions(image_np))
 
-    tasks = [
-        process_crop(image, d["bbox"], d["label"], r2)
-        for d in detections
-    ]
+    # -------------------------
+    # CROPS
+    # -------------------------
+    crops = []
+    meta = []
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for d in detections:
+        x1, y1, x2, y2 = map(int, d["bbox"])
 
-    return [r for r in results if isinstance(r, dict)]
+        crop = image.crop((x1, y1, x2, y2))
+
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG")
+
+        crops.append(buf.getvalue())
+        meta.append(d)
+
+    # -------------------------
+    # BG REMOVAL (BATCH)
+    # -------------------------
+    masked_list = await batch_bg(crops)
+
+    # -------------------------
+    # UPLOAD (PARALLEL)
+    # -------------------------
+    async def upload_one(raw, masked, label):
+        file_id = str(uuid.uuid4())
+
+        upload = r2.upload_wardrobe_images(
+            file_id=file_id,
+            raw_image_bytes=raw,
+            masked_image_bytes=masked
+        )
+
+        return {
+            "item_id": file_id,
+            "label": label,
+            "raw_url": upload["raw_image_url"],
+            "masked_url": upload["masked_image_url"]
+        }
+
+    results = await asyncio.gather(
+        *[upload_one(r, m, meta[i]["label"]) for i, (r, m) in enumerate(zip(crops, masked_list))]
+    )
+
+    return results

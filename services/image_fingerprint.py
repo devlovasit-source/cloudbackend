@@ -159,3 +159,9 @@ def hamming_distance_hex(h1: Any, h2: Any) -> Optional[int]:
 # =========================
 def hamming_distance(h1: str, h2: str) -> Optional[int]:
     return hamming_distance_hex(h1, h2)
+# =========================
+# 🔥 BACKWARD COMPATIBILITY (CRITICAL FIX)
+# =========================
+
+def compute_pixel_hash_from_base64(value: Any) -> str:
+    return compute_hash_from_base64(value)

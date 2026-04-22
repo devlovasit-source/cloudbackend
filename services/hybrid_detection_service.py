@@ -38,14 +38,14 @@ def resize_image(image: Image.Image):
     return image.resize((int(w * scale), int(h * scale)))
 
 
-def image_to_base64(image: Image.Image) -> str:
+def image_to_bytes(image: Image.Image) -> bytes:
     buf = io.BytesIO()
     image.save(buf, format="JPEG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
 # =========================
-# HF DETECTION
+# HF DETECTION (SYNC)
 # =========================
 def hf_detect(image: Image.Image):
     if not HF_TOKEN:
@@ -53,19 +53,14 @@ def hf_detect(image: Image.Image):
         return []
 
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-    image_b64 = image_to_base64(image)
+    image_bytes = image_to_bytes(image)
 
     try:
         res = requests.post(
             HF_URL,
             headers=headers,
-            json={
-                "inputs": {
-                    "image": image_b64,
-                    "text": TEXT_PROMPT
-                }
-            },
+            data=image_bytes,                # ✅ RAW BYTES (IMPORTANT)
+            params={"text": TEXT_PROMPT},    # ✅ PROMPT PARAM
             timeout=20
         )
 
@@ -82,14 +77,34 @@ def hf_detect(image: Image.Image):
         return []
 
 
+# =========================
+# HF DETECTION (ASYNC WRAPPER)
+# =========================
+async def hf_detect_async(image: Image.Image):
+    return await asyncio.to_thread(hf_detect, image)
+
+
+# =========================
+# SAFE PARSER
+# =========================
 def parse_detections(hf_output):
+    if not hf_output:
+        return []
+
+    # handle dict response
+    if isinstance(hf_output, dict):
+        if "error" in hf_output:
+            print("[HF ERROR]", hf_output["error"])
+            return []
+        hf_output = hf_output.get("outputs", [])
+
     detections = []
 
     for item in hf_output:
         box = item.get("box", {})
 
         detections.append({
-            "label": item.get("label"),
+            "label": item.get("label", "item"),
             "bbox": [
                 int(box.get("xmin", 0)),
                 int(box.get("ymin", 0)),
@@ -103,7 +118,7 @@ def parse_detections(hf_output):
 
 
 # =========================
-# MEDIAPIPE (ACCESSORIES BOOST)
+# MEDIAPIPE
 # =========================
 mp_face = mp.solutions.face_mesh
 mp_pose = mp.solutions.pose
@@ -119,7 +134,11 @@ def get_regions(image_np):
             lm = res.multi_face_landmarks[0]
             x = int(lm.landmark[234].x * w)
             y = int(lm.landmark[234].y * h)
-            regions.append({"label": "earring", "bbox": [x-40, y-40, x+40, y+40], "score": 0.9})
+            regions.append({
+                "label": "earring",
+                "bbox": [x-40, y-40, x+40, y+40],
+                "score": 0.9
+            })
 
     with mp_pose.Pose(static_image_mode=True) as pose:
         res = pose.process(image_np)
@@ -127,7 +146,11 @@ def get_regions(image_np):
             wrist = res.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_WRIST]
             x = int(wrist.x * w)
             y = int(wrist.y * h)
-            regions.append({"label": "watch", "bbox": [x-50, y-50, x+50, y+50], "score": 0.9})
+            regions.append({
+                "label": "watch",
+                "bbox": [x-50, y-50, x+50, y+50],
+                "score": 0.9
+            })
 
     return regions
 
@@ -191,12 +214,14 @@ async def run_hybrid_detection(image: Image.Image):
     r2 = R2Storage()
 
     # -------------------------
-    # HF DETECTION
+    # HF DETECTION (ASYNC)
     # -------------------------
-    hf_output = hf_detect(image)
+    hf_output = await hf_detect_async(image)
     detections = parse_detections(hf_output)
 
-    # add mediapipe intelligence
+    # -------------------------
+    # MEDIAPIPE BOOST
+    # -------------------------
     detections.extend(get_regions(image_np))
 
     detections = filter_and_limit(detections, width, height)

@@ -35,6 +35,30 @@ def _stable_index(key: str, n: int) -> int:
     return int(digest[:8], 16) % n
 
 
+def _sanitize_bank_text(text: str) -> str:
+    """
+    Banks currently contain some mojibake sequences (likely from a prior copy/paste encoding).
+    Clean them so the UX doesn't feel broken/cheap.
+    """
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    replacements = {
+        "â€™": "'",
+        "â€˜": "'",
+        "â€œ": "\"",
+        "â€": "\"",
+        "â€”": " - ",
+        "â€“": "-",
+        "â€¦": "...",
+        "Â": "",
+    }
+    for k, v in replacements.items():
+        s = s.replace(k, v)
+    s = " ".join(s.split())
+    return s.strip()
+
+
 def pick_bank_phrase(*, bank_path: str, category: str, key: str) -> str:
     bank = _get_bank(bank_path)
     cats = (
@@ -57,7 +81,7 @@ def pick_bank_phrase(*, bank_path: str, category: str, key: str) -> str:
         return ""
     idx = _stable_index(f"{key}:{category}", len(phrases))
     text = str(phrases[idx] or "").strip()
-    return text
+    return _sanitize_bank_text(text)
 
 
 def color_harmony_snippet(score_hint: float, *, key: str) -> str:

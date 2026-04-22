@@ -6,8 +6,8 @@ from typing import Dict, Any
 import requests
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
 
-from routers.bg_remover import remove_background_sync
-
+# NEW ✅
+from services.bg_service import remove_bg_external as remove_background_sync
 
 class StyleBoardRenderer:
     """

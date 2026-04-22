@@ -747,9 +747,9 @@ def vision_analyze_core(image_base64: str, user_id: str = "demo_user"):
 
     items = _build_items_from_single(final_data)
     rel = _analyze_outfit_relationship(items)
+    style_meta = _build_style_meta(final_data)
     score = _score_outfit(rel, items, style_meta, final_data)
     improvements = _generate_improvements(items, rel)
-    style_meta = _build_style_meta(final_data)
     visual_intelligence = _build_visual_intelligence(final_data, items, rel, style_meta)
 
     image_duplicate = {"checked": False, "is_duplicate": False, "id": None, "score": 0.0}

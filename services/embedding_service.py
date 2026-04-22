@@ -31,14 +31,18 @@ def _get_model():
     return _model
 
 
+# ✅ ✅ ✅ CRITICAL FIX (THIS WAS MISSING)
+def get_model():
+    """
+    Public accessor (used across app)
+    """
+    return _get_model()
+
+
 # =========================
 # TEXT BUILDING
 # =========================
 def _build_text(data: dict) -> str:
-    """
-    Convert metadata → flat text string
-    """
-
     category = str(data.get("category") or "")
     sub_category = str(data.get("sub_category") or "")
     color = str(data.get("color_code") or "")
@@ -51,7 +55,7 @@ def _build_text(data: dict) -> str:
     else:
         occasions = str(occasions_raw or "")
 
-    text = " ".join([
+    return " ".join([
         category,
         sub_category,
         color,
@@ -60,16 +64,11 @@ def _build_text(data: dict) -> str:
         occasions
     ]).strip()
 
-    return text
-
 
 # =========================
 # 🔥 CORE ENCODERS
 # =========================
 def encode_text(text: str) -> List[float]:
-    """
-    Generic text embedding
-    """
     try:
         if not text:
             return []
@@ -85,9 +84,6 @@ def encode_text(text: str) -> List[float]:
 
 
 def encode_metadata(data: dict) -> List[float]:
-    """
-    Main function used across system
-    """
     try:
         text = _build_text(data)
         return encode_text(text)
@@ -108,5 +104,5 @@ class EmbeddingService:
         return encode_metadata(data)
 
 
-# 🔥 singleton instance (important for reuse)
+# 🔥 singleton instance
 embedding_service = EmbeddingService()

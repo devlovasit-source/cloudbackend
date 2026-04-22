@@ -153,10 +153,13 @@ def hamming_distance_hex(h1: Any, h2: Any) -> Optional[int]:
     except Exception:
         return None
 
+# =========================
+# 🔥 BACKWARD COMPATIBILITY (FINAL FIX)
+# =========================
 
-# =========================
-# 🔥 BACKWARD COMPATIBILITY (CRITICAL)
-# =========================
+def compute_pixel_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
+    return compute_hash_from_bytes(image_bytes, size)
+
 
 def compute_pixel_hash_from_base64(value: Any) -> str:
     return compute_hash_from_base64(value)

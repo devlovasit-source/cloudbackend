@@ -1,7 +1,9 @@
-import json
+import logging
 from typing import Dict, Any
 
-from services.ai_gateway import generate_text
+from services.ai_gateway import generate_text, parse_json_object
+
+logger = logging.getLogger("ahvi.intent_engine")
 
 
 INTENT_PROMPT = """
@@ -40,11 +42,155 @@ User:
 
 def _safe_parse(text: str) -> Dict[str, Any]:
     try:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        return json.loads(text[start:end])
+        return parse_json_object(text)
     except Exception:
         return {"intent": "general", "slots": {}, "confidence": 0.3}
+
+
+_ALLOWED_INTENTS = {
+    "daily_dependency",
+    "daily_outfit",
+    "occasion_outfit",
+    "explore_styles",
+    "wardrobe_query",
+    "try_on",
+    "organize_hub",
+    "plan_pack",
+    "general",
+}
+
+_ALLOWED_TIMES = {"morning", "midday", "afternoon", "evening", "night"}
+
+_ALLOWED_MODULES = {
+    "life_boards",
+    "meal_planner",
+    "medicines",
+    "bills",
+    "calendar",
+    "workout",
+    "skincare",
+    "contacts",
+    "life_goals",
+}
+
+
+def _norm_text(value: Any, *, max_len: int = 64) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) > max_len:
+        text = text[:max_len].rstrip()
+    return text
+
+
+def _norm_key(value: Any) -> str:
+    text = _norm_text(value, max_len=64).lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_")
+
+
+def _normalize_slots(raw: Any) -> Dict[str, Any]:
+    slots = dict(raw) if isinstance(raw, dict) else {}
+    out: Dict[str, Any] = {}
+
+    occasion = _norm_key(slots.get("occasion"))
+    occasion_map = {
+        "date": "date_night",
+        "date_night": "date_night",
+        "datenight": "date_night",
+        "office": "office",
+        "work": "office",
+        "workwear": "office",
+        "wedding": "wedding",
+        "party": "party",
+        "travel": "travel",
+        "gym": "gym",
+        "workout": "gym",
+        "fitness": "gym",
+        "casual": "casual",
+        "formal": "formal",
+        "event": "event",
+    }
+    if occasion:
+        out["occasion"] = occasion_map.get(occasion, occasion)
+
+    time_slot = _norm_key(slots.get("time"))
+    if time_slot in _ALLOWED_TIMES:
+        out["time"] = time_slot
+
+    module = _norm_key(slots.get("module"))
+    module_map = {
+        "life_board": "life_boards",
+        "life_boards": "life_boards",
+        "meals": "meal_planner",
+        "meal": "meal_planner",
+        "diet": "meal_planner",
+        "nutrition": "meal_planner",
+        "medicine": "medicines",
+        "meds": "medicines",
+        "bills": "bills",
+        "bill": "bills",
+        "calendar": "calendar",
+        "schedule": "calendar",
+        "workout": "workout",
+        "fitness": "workout",
+        "gym": "workout",
+        "skincare": "skincare",
+        "contacts": "contacts",
+        "goals": "life_goals",
+        "life_goals": "life_goals",
+    }
+    if module:
+        canonical = module_map.get(module, module)
+        if canonical in _ALLOWED_MODULES:
+            out["module"] = canonical
+
+    style = _norm_text(slots.get("style"), max_len=48).lower()
+    if style:
+        out["style"] = style
+
+    vibe = _norm_text(slots.get("vibe"), max_len=48).lower()
+    if vibe:
+        out["vibe"] = vibe
+
+    return out
+
+
+def _validate_intent_row(row: Any, *, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Reduce over-trust in the LLM by:
+    - allowlist intents
+    - clamping confidence
+    - normalizing slots
+    - requiring minimum confidence for non-general intents
+    - cross-checking against deterministic heuristic intent when confidence is low
+    """
+    base = dict(row) if isinstance(row, dict) else {}
+    intent = _norm_key(base.get("intent")) or "general"
+    if intent not in _ALLOWED_INTENTS:
+        intent = "general"
+
+    try:
+        conf = float(base.get("confidence", 0.0))
+    except Exception:
+        conf = 0.0
+    conf = max(0.0, min(conf, 1.0))
+
+    slots = _normalize_slots(base.get("slots"))
+
+    # If model claims a specific intent but isn't confident, fall back.
+    if intent != "general" and conf < 0.55:
+        return {**fallback, "slots": {**_normalize_slots(fallback.get("slots")), **slots}}
+
+    # If model disagrees with heuristic and isn't very confident, prefer heuristic.
+    heuristic_intent = _norm_key(fallback.get("intent")) or "general"
+    if heuristic_intent in _ALLOWED_INTENTS and intent != heuristic_intent and conf < 0.75:
+        merged_slots = {**_normalize_slots(base.get("slots")), **_normalize_slots(fallback.get("slots"))}
+        return {"intent": heuristic_intent, "slots": merged_slots, "confidence": max(float(fallback.get("confidence", 0.0) or 0.0), conf)}
+
+    return {"intent": intent, "slots": slots, "confidence": conf}
 
 
 def _fallback_intent(text: str) -> Dict[str, Any]:
@@ -143,7 +289,7 @@ def detect_intent(user_text: str, history=None, model: str | None = None) -> Dic
     # Fast deterministic path first; avoids unnecessary model latency for obvious intents.
     fallback = _fallback_intent(user_text)
     if float(fallback.get("confidence", 0.0)) >= 0.75:
-        return fallback
+        return _validate_intent_row(fallback, fallback=fallback)
 
     prompt = INTENT_PROMPT + user_text
     try:
@@ -154,21 +300,17 @@ def detect_intent(user_text: str, history=None, model: str | None = None) -> Dic
             model=model,
         )
     except Exception:
-        return fallback
+        return _validate_intent_row(fallback, fallback=fallback)
 
     parsed = _safe_parse(response)
-
-    if not parsed.get("intent"):
-        parsed = fallback
-    elif str(response).strip().lower() in ("none", ""):
-        parsed = fallback
-    elif parsed.get("intent") == "general" and float(parsed.get("confidence", 0.0)) < 0.55:
-        parsed = fallback
+    parsed = _validate_intent_row(parsed, fallback=fallback)
 
     if history:
         last = history[-1] if history else {}
-        if parsed["intent"] == "general" and last.get("intent"):
-            parsed["intent"] = last.get("intent")
-            parsed["confidence"] = max(parsed.get("confidence", 0.0), 0.6)
+        if parsed.get("intent") == "general" and last.get("intent"):
+            last_intent = _norm_key(last.get("intent"))
+            if last_intent in _ALLOWED_INTENTS and last_intent != "general":
+                parsed["intent"] = last_intent
+                parsed["confidence"] = max(float(parsed.get("confidence", 0.0) or 0.0), 0.6)
 
     return parsed

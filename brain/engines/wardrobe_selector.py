@@ -56,6 +56,32 @@ class WardrobeSelector:
         t = t.lower().strip()
         return self.TYPE_MAP.get(t, t)
 
+    def _context_score(self, item: Dict[str, Any], context: Dict[str, Any], outfit: List[Dict[str, Any]]) -> float:
+        score = 0.0
+
+        style_dna = context.get("style_dna", {}) or {}
+        preferred_styles = style_dna.get("preferred_styles", []) or []
+        preferred_styles = [str(x).strip().lower() for x in preferred_styles if str(x).strip()]
+
+        item_style = str(item.get("style") or "").strip().lower()
+        if item_style and item_style in preferred_styles:
+            score += 0.4
+
+        outfit_colors = []
+        if isinstance(outfit, list):
+            for i in outfit:
+                if not isinstance(i, dict):
+                    continue
+                c = str(i.get("color") or i.get("color_code") or "").strip()
+                if c:
+                    outfit_colors.append(color_normalizer.normalize(c))
+
+        item_color = color_normalizer.normalize(str(item.get("color") or item.get("color_code") or ""))
+        if item_color and outfit_colors and item_color in outfit_colors:
+            score += 0.5
+
+        return score
+
     # =========================
     # MAIN API
     # =========================
@@ -91,14 +117,6 @@ class WardrobeSelector:
 
         preferred_norm = [color_normalizer.normalize(c) for c in (preferred_colors or []) if c]
         current_outfit = context.get("current_outfit", []) if isinstance(context.get("current_outfit"), list) else []
-        outfit_colors = []
-        if current_outfit:
-            for it in current_outfit:
-                if not isinstance(it, dict):
-                    continue
-                c = color_normalizer.normalize(str(it.get("color") or it.get("color_code") or ""))
-                if c:
-                    outfit_colors.append(c)
 
         # -------------------------
         # FILTER BY TYPE (SMART)
@@ -179,17 +197,15 @@ class WardrobeSelector:
                 score += 0.06
 
             # Context scoring: align with current outfit palette / user's style.
-            item_style = str(item.get("style") or "").strip().lower()
-            preferred_styles = (context.get("style_dna") or {}).get("preferred_styles") or []
-            if isinstance(preferred_styles, list) and item_style and item_style in [str(x).strip().lower() for x in preferred_styles if str(x).strip()]:
-                score += 0.12
-            if outfit_colors and color and color in outfit_colors:
-                score += 0.10
+            score += self._context_score(item, context, current_outfit)
 
             # Memory: boost items aligned with user's past likes (bounded by MemoryScorer clamp).
             if item.get("embedding"):
                 try:
-                    score += float(memory_scorer.score(item["embedding"], context)) * 0.10
+                    mem = float(memory_scorer.score(item["embedding"], context))
+                    # Keep bounded so memory doesn't drown out objective fit/palette signals.
+                    mem = max(-1.0, min(mem, 1.0))
+                    score += mem
                 except Exception:
                     pass
 

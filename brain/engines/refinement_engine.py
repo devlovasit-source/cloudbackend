@@ -44,6 +44,14 @@ class RefinementEngine:
             if not isinstance(items, list):
                 items = []
 
+            score_meta = new_outfit.get("score_meta", {}) if isinstance(new_outfit.get("score_meta"), dict) else {}
+            reasons = score_meta.get("reasons", []) if isinstance(score_meta.get("reasons"), list) else []
+            score = new_outfit.get("score", 0)
+            try:
+                score = float(score or 0.0)
+            except Exception:
+                score = 0.0
+
             base_snapshot = self._unified_snapshot(items, context, graph)
             try:
                 base_score = float(base_snapshot.get("score") or 0.0)
@@ -51,7 +59,7 @@ class RefinementEngine:
                 base_score = 0.0
 
             # Prevent over-refinement: if already strong and no explicit mode requested, keep it.
-            if not mode and base_score >= 7.5:
+            if (score > 7.5 or base_score >= 7.5) and not context.get("force_refine"):
                 new_outfit["unified_style_refinement"] = base_snapshot
                 refined_outfits.append(new_outfit)
                 continue
@@ -75,6 +83,11 @@ class RefinementEngine:
             # -------------------------
             # 4. TARGETED CORRECTIONS (SCORE-AWARE)
             # -------------------------
+            if "palette aligned" not in reasons:
+                items = self._fix_palette(items)
+            if "clean aesthetic balance" not in reasons:
+                items = self._fix_silhouette(items)
+
             items = self._apply_targeted_corrections(
                 items=items,
                 outfit=new_outfit,
@@ -85,6 +98,8 @@ class RefinementEngine:
             # Weather-triggered practical fix.
             if str((context.get("signals") or {}).get("weather_mode") or "").strip().lower() in ("hot", "summer", "heat", "warm"):
                 items = self._make_breathable(items)
+                # remove heavy fabrics if explicit (best-effort)
+                items = [i for i in items if not (isinstance(i, dict) and str(i.get("fabric") or "").strip().lower() == "heavy")]
 
             # -------------------------
             # 5. REAL WARDROBE SWAP
@@ -111,6 +126,27 @@ class RefinementEngine:
             refined_outfits.append(new_outfit)
 
         return refined_outfits
+
+    def _fix_palette(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        neutrals = {"black", "white", "beige", "grey", "gray", "navy", "cream"}
+        for i in items:
+            if not isinstance(i, dict):
+                continue
+            c = str(i.get("color") or i.get("color_code") or "").strip().lower()
+            if c and c not in neutrals:
+                # Hint for selector: keep the same base type but bias toward neutral colors.
+                i["preferred_replacement"] = self._base_type(i) or "top"
+                i["preferred_colors"] = ["black", "white", "beige", "grey", "navy", "cream"]
+        return items
+
+    def _fix_silhouette(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for i in items:
+            if not isinstance(i, dict):
+                continue
+            # Some wardrobes store fit tags; best-effort hinting.
+            if str(i.get("fit") or "").strip().lower() == "oversized":
+                i["preferred_fit"] = "regular"
+        return items
 
     def _make_breathable(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # Lightweight guidance: avoid heavy layering pieces when hot.
@@ -403,6 +439,7 @@ class RefinementEngine:
         for i in items:
 
             replacement_type = i.get("preferred_replacement")
+            preferred_colors = i.get("preferred_colors") if isinstance(i, dict) and isinstance(i.get("preferred_colors"), list) else None
 
             if not replacement_type:
                 swapped.append(i)
@@ -412,7 +449,9 @@ class RefinementEngine:
             candidate = wardrobe_selector.find_best_match(
                 replacement_type,
                 context,
-                reference_embedding=i.get("embedding")
+                reference_embedding=i.get("embedding") if isinstance(i, dict) else None,
+                preferred_colors=preferred_colors,
+                require_occasion=str(context.get("occasion") or "").strip().lower() or None,
             )
 
             if candidate:

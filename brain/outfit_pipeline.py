@@ -920,6 +920,12 @@ def _attach_score_meta(outfit: Dict[str, Any], context: Dict[str, Any]) -> None:
     except Exception:
         outfit["style_score"] = 0.0
 
+    # Phase plan expects 'score' to reflect the style_scorer output after refinement.
+    # Preserve the original pipeline score so we don't lose internal ranking context.
+    if "pipeline_score" not in outfit:
+        outfit["pipeline_score"] = outfit.get("score")
+    outfit["score"] = outfit.get("style_score")
+
 
 def _swap_part(outfit: Dict[str, Any], part: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
     updated = deepcopy(outfit)

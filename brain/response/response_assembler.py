@@ -184,8 +184,8 @@ class ResponseAssembler:
         text = " ".join(parts)
 
         sentences = text.split(". ")
-        if len(sentences) > 3:
-            text = ". ".join(sentences[:3])
+        if len(sentences) > 4:
+            text = ". ".join(sentences[:4])
 
         return text.strip()
 
@@ -193,33 +193,31 @@ class ResponseAssembler:
     # 🧠 VISUAL INTELLIGENCE
     # =========================
     def _build_visual_explanation(self, outfit, context):
-
-        outfit = outfit if isinstance(outfit, dict) else {}
-        score_meta = outfit.get("score_meta") if isinstance(outfit.get("score_meta"), dict) else None
-        if score_meta is None:
-            score_meta = outfit.get("unified_style") if isinstance(outfit.get("unified_style"), dict) else {}
-        reasons = score_meta.get("reasons") if isinstance(score_meta.get("reasons"), list) else []
-        reasons = [str(r).strip().lower() for r in reasons if str(r).strip()]
+        score_meta = outfit.get("score_meta", {}) if isinstance(outfit, dict) else {}
+        if not isinstance(score_meta, dict):
+            score_meta = {}
+        reasons = score_meta.get("reasons", []) if isinstance(score_meta.get("reasons"), list) else []
 
         parts = []
 
-        if any("palette aligned" in r for r in reasons):
+        if "palette aligned" in reasons:
             parts.append("The colors work really well together.")
 
-        if any("clean aesthetic balance" in r for r in reasons):
-            parts.append("The overall silhouette feels balanced.")
+        if "clean aesthetic balance" in reasons:
+            parts.append("The silhouette feels balanced and clean.")
 
-        if any("matches your style" in r for r in reasons):
+        if "matches your style" in reasons:
             parts.append("This fits your personal style nicely.")
 
-        if any("items pair well" in r for r in reasons):
-            parts.append("The pieces pair naturally without feeling forced.")
+        if "aligned with your past choices" in reasons:
+            parts.append("This aligns with what you usually like.")
 
         if not parts:
-            parts.append("This comes together cleanly.")
+            parts.append("This comes together in a clean and easy way.")
 
-        if context.get("occasion"):
-            parts.append(f"It works well for {context.get('occasion')}.")
+        signals = context.get("signals", {}) if isinstance(context, dict) else {}
+        if isinstance(signals, dict) and signals.get("weather_mode") == "hot":
+            parts.append("This works well for warmer days.")
 
         return " ".join(parts).strip()
 
@@ -294,7 +292,7 @@ class ResponseAssembler:
         return ""
 
     def _closer(self):
-        return "Want me to tweak it?"
+        return "Want a sharper or more relaxed version?"
 
     def _fallback(self, data: dict) -> str:
         if not data:

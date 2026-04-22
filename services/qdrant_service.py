@@ -24,12 +24,10 @@ class QdrantService:
         self.url = os.getenv("QDRANT_URL")
         self.api_key = os.getenv("QDRANT_API_KEY")
 
-        # 🔥 COLLECTIONS (CLEANED)
         self.collection = os.getenv("QDRANT_COLLECTION", "wardrobe")
         self.memory_collection = os.getenv("QDRANT_MEMORY_COLLECTION", "outfit_memory")
         self.user_memory_collection = os.getenv("QDRANT_USER_MEMORY_COLLECTION", "user_memory")
 
-        # 🔥 HYBRID VECTOR (512)
         self.vector_size = 512
         self.memory_vector_size = int(os.getenv("QDRANT_MEMORY_VECTOR_SIZE", "8"))
         self.user_memory_vector_size = self.vector_size
@@ -79,8 +77,18 @@ class QdrantService:
             self.init()
         return True
 
-    def enabled(self):
-        return bool(self.client)
+    # =========================
+    # 🔥 NORMALIZATION
+    # =========================
+    def _normalize(self, vector):
+        if not vector:
+            return vector
+
+        norm = sum(v * v for v in vector) ** 0.5
+        if norm == 0:
+            return vector
+
+        return [v / norm for v in vector]
 
     # =========================
     # UPSERT (MAIN)
@@ -92,6 +100,8 @@ class QdrantService:
         if not vector or len(vector) != self.vector_size:
             print("❌ Vector size mismatch:", len(vector))
             return
+
+        vector = self._normalize(vector)
 
         payload["timestamp"] = time.time()
 
@@ -106,58 +116,55 @@ class QdrantService:
                     )
                 ],
             )
-            print("✅ QDRANT UPSERT:", item_id)
-
         except Exception as e:
             print("❌ Upsert failed:", str(e))
 
     # =========================
-    # WARDROBE HELPER
+    # 🔥 BATCH UPSERT (NEW)
     # =========================
-    def upsert_wardrobe_item(self, item: dict):
-        try:
-            self.upsert_item(
-                item_id=item["id"],
-                vector=item.get("embedding", [0.0] * self.vector_size),
-                payload={
-                    "userId": item.get("userId"),
-                    "category": item.get("category"),
-                    "sub_category": item.get("sub_category"),
-                    "color": item.get("color_code"),
-                    "image_url": item.get("image_url"),
-                    "pixel_hash": item.get("pixel_hash"),
-                }
-            )
-        except Exception as e:
-            print("❌ Wardrobe upsert failed:", str(e))
-
-    # =========================
-    # STYLE BOARD UPSERT
-    # =========================
-    def upsert_style_board(self, board_id, vector, payload):
+    def upsert_batch(self, items):
         if not self._ensure():
+            return
+
+        points = []
+
+        for item in items:
+            vec = item.get("vector")
+            if not vec or len(vec) != self.vector_size:
+                continue
+
+            vec = self._normalize(vec)
+
+            payload = item.get("payload", {})
+            payload["timestamp"] = time.time()
+
+            points.append(
+                PointStruct(
+                    id=item.get("id", str(uuid.uuid4())),
+                    vector=vec,
+                    payload=payload,
+                )
+            )
+
+        if not points:
             return
 
         try:
             self.client.upsert(
                 collection_name=self.collection,
-                points=[
-                    PointStruct(
-                        id=f"board_{board_id}",
-                        vector=vector,
-                        payload=payload,
-                    )
-                ],
+                points=points,
             )
         except Exception as e:
-            print("❌ Board upsert failed:", str(e))
+            print("❌ Batch upsert failed:", str(e))
 
     # =========================
-    # SEARCH (FILTERED)
+    # 🔥 SEARCH (WITH THRESHOLD)
     # =========================
-    def search_similar(self, vector, user_id, category=None, limit=5):
+    def search_similar(self, vector, user_id, category=None, limit=5, score_threshold=0.6):
         if not self._ensure() or not vector:
             return []
+
+        vector = self._normalize(vector)
 
         try:
             must = [
@@ -183,6 +190,7 @@ class QdrantService:
                     "payload": r.payload or {},
                 }
                 for r in results
+                if r.score >= score_threshold
             ]
 
         except Exception as e:
@@ -190,147 +198,27 @@ class QdrantService:
             return []
 
     # =========================
-    # SEMANTIC RETRIEVE
-    # =========================
-    def semantic_retrieve(self, vector, user_id, limit=40):
-        return self.search_similar(vector, user_id, None, limit)
-
-    # =========================
-    # BOARD SEARCH
-    # =========================
-    def search_similar_boards(self, vector, limit=10):
-        if not self._ensure():
-            return []
-
-        try:
-            results = self.client.search(
-                collection_name=self.collection,
-                query_vector=vector,
-                limit=limit,
-            )
-
-            return [
-                {
-                    "id": str(r.id),
-                    "score": float(r.score),
-                    "payload": r.payload or {},
-                }
-                for r in results
-                if str(r.id).startswith("board_")
-            ]
-
-        except Exception as e:
-            print("❌ Board search failed:", str(e))
-            return []
-
-    # =========================
-    # SCROLL BOARDS
-    # =========================
-    def get_all_boards(self, limit=100):
-        if not self._ensure():
-            return []
-
-        try:
-            response = self.client.scroll(
-                collection_name=self.collection,
-                limit=limit,
-                with_payload=True,
-                with_vectors=True,
-            )
-
-            points = response[0] if isinstance(response, tuple) else []
-
-            return [
-                {
-                    "id": str(p.id),
-                    "embedding": getattr(p, "vector", None),
-                    "payload": getattr(p, "payload", {}) or {},
-                }
-                for p in points
-                if str(p.id).startswith("board_")
-            ]
-
-        except Exception as e:
-            print("❌ Fetch boards failed:", str(e))
-            return []
-
-    # =========================
-    # FEEDBACK
-    # =========================
-    def update_feedback(self, item_id, feedback):
-        if not self._ensure():
-            return
-
-        try:
-            self.client.set_payload(
-                collection_name=self.collection,
-                payload={"feedback": feedback},
-                points=[item_id],
-            )
-        except Exception as e:
-            print("❌ Feedback update failed:", str(e))
-
-    # =========================
-    # MEMORY VECTOR
-    # =========================
-    def upsert_memory_vector(self, point_id, vector, payload):
-        if not self._ensure():
-            return
-
-        try:
-            self.client.upsert(
-                collection_name=self.memory_collection,
-                points=[PointStruct(id=point_id, vector=vector, payload=payload)],
-            )
-        except Exception as e:
-            print("❌ Memory upsert failed:", str(e))
-
-    # =========================
-    # USER MEMORY
-    # =========================
-    def upsert_user_memory(self, user_id, vector, payload):
-        if not self._ensure():
-            return None
-
-        try:
-            self.client.upsert(
-                collection_name=self.user_memory_collection,
-                points=[
-                    PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=vector,
-                        payload=payload,
-                    )
-                ],
-            )
-        except Exception as e:
-            print("❌ User memory upsert failed:", str(e))
-
-    # =========================
-    # 🔥 PIXEL DUPLICATE (IMPORTANT)
+    # 🔥 FAST PIXEL DUPLICATE
     # =========================
     def find_pixel_duplicate(self, user_id, pixel_hash, max_distance=6):
         if not self._ensure() or not pixel_hash:
             return {"checked": False, "is_duplicate": False}
 
         try:
-            query_filter = Filter(
-                must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
-            )
-
+            # 🔥 only fetch limited candidates
             response = self.client.scroll(
                 collection_name=self.collection,
-                scroll_filter=query_filter,
-                limit=200,
+                limit=100,
                 with_payload=True,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="userId", match=MatchValue(value=str(user_id)))]
+                ),
             )
 
             points = response[0] if isinstance(response, tuple) else []
 
             for point in points:
-                payload = point.payload or {}
-                candidate_hash = payload.get("pixel_hash")
-
+                candidate_hash = (point.payload or {}).get("pixel_hash")
                 if not candidate_hash:
                     continue
 
@@ -348,6 +236,29 @@ class QdrantService:
 
         except Exception:
             return {"checked": True, "is_duplicate": False}
+
+    # =========================
+    # USER MEMORY
+    # =========================
+    def upsert_user_memory(self, user_id, vector, payload):
+        if not self._ensure() or not vector:
+            return None
+
+        vector = self._normalize(vector)
+
+        try:
+            self.client.upsert(
+                collection_name=self.user_memory_collection,
+                points=[
+                    PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=vector,
+                        payload=payload,
+                    )
+                ],
+            )
+        except Exception as e:
+            print("❌ User memory upsert failed:", str(e))
 
     # =========================
     # STATUS

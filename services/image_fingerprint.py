@@ -1,125 +1,150 @@
 import base64
-from typing import Any
+import asyncio
+from typing import Any, Optional
 
 import cv2
 import numpy as np
-import requests
+import httpx
 
 
+# =========================
+# CACHE (LRU STYLE)
+# =========================
 _URL_HASH_CACHE: dict[str, str] = {}
 _URL_HASH_CACHE_MAX = 2048
-
-
-def _normalize_base64(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if "," in text:
-        text = text.split(",", 1)[1]
-    return text.strip()
 
 
 def _cache_get(url: str) -> str:
     return _URL_HASH_CACHE.get(url, "")
 
 
-def _cache_set(url: str, pixel_hash: str) -> None:
-    if not url or not pixel_hash:
+def _cache_set(url: str, value: str):
+    if not url or not value:
         return
-    _URL_HASH_CACHE[url] = pixel_hash
+
+    _URL_HASH_CACHE[url] = value
+
     if len(_URL_HASH_CACHE) > _URL_HASH_CACHE_MAX:
-        oldest = next(iter(_URL_HASH_CACHE.keys()), None)
-        if oldest:
-            _URL_HASH_CACHE.pop(oldest, None)
+        # remove oldest
+        _URL_HASH_CACHE.pop(next(iter(_URL_HASH_CACHE)), None)
 
 
-def _decode_image_bytes(image_bytes: bytes):
+# =========================
+# IMAGE DECODE
+# =========================
+def _decode_bytes(image_bytes: bytes):
     if not image_bytes:
         return None
-    np_arr = np.frombuffer(image_bytes, np.uint8)
-    return cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
+
+    arr = np.frombuffer(image_bytes, np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
 
 
-def _foreground_crop(decoded):
-    if decoded is None:
-        return None
-    if decoded.ndim == 2:
-        return cv2.cvtColor(decoded, cv2.COLOR_GRAY2BGR)
-
-    if decoded.ndim != 3:
+def _foreground_crop(img):
+    if img is None:
         return None
 
-    if decoded.shape[2] == 4:
-        alpha = decoded[:, :, 3]
-        ys, xs = np.where(alpha > 12)
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    if img.shape[2] == 4:
+        alpha = img[:, :, 3]
+        ys, xs = np.where(alpha > 10)
+
         if len(xs) and len(ys):
-            x1, x2 = int(xs.min()), int(xs.max()) + 1
-            y1, y2 = int(ys.min()), int(ys.max()) + 1
-            return decoded[y1:y2, x1:x2, :3]
-        return decoded[:, :, :3]
+            x1, x2 = xs.min(), xs.max() + 1
+            y1, y2 = ys.min(), ys.max() + 1
+            return img[y1:y2, x1:x2, :3]
 
-    return decoded[:, :, :3]
+        return img[:, :, :3]
+
+    return img[:, :, :3]
 
 
-def compute_pixel_hash_from_bytes(image_bytes: bytes, hash_size: int = 8) -> str:
+# =========================
+# CORE HASH FUNCTION
+# =========================
+def compute_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
     try:
-        decoded = _decode_image_bytes(image_bytes)
-        crop = _foreground_crop(decoded)
+        img = _decode_bytes(image_bytes)
+        crop = _foreground_crop(img)
+
         if crop is None or crop.size == 0:
             return ""
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        resized = cv2.resize(gray, (hash_size + 1, hash_size), interpolation=cv2.INTER_AREA)
+
+        resized = cv2.resize(gray, (size + 1, size), interpolation=cv2.INTER_AREA)
         diff = resized[:, 1:] > resized[:, :-1]
-        bits = "".join("1" if v else "0" for v in diff.flatten())
-        if not bits:
+
+        bits = diff.flatten()
+        if bits.size == 0:
             return ""
 
-        width = (hash_size * hash_size + 3) // 4
-        return f"{int(bits, 2):0{width}x}"
+        value = 0
+        for b in bits:
+            value = (value << 1) | int(b)
+
+        return hex(value)[2:]
+
     except Exception:
         return ""
 
 
-def compute_pixel_hash_from_base64(value: Any, hash_size: int = 8) -> str:
-    text = _normalize_base64(value)
+# =========================
+# BASE64 (OPTIONAL)
+# =========================
+def compute_hash_from_base64(value: Any) -> str:
+    text = str(value or "").strip()
     if not text:
         return ""
+
+    if "," in text:
+        text = text.split(",", 1)[1]
+
     try:
         image_bytes = base64.b64decode(text, validate=True)
     except Exception:
         return ""
-    return compute_pixel_hash_from_bytes(image_bytes, hash_size=hash_size)
+
+    return compute_hash_from_bytes(image_bytes)
 
 
-def compute_pixel_hash_from_url(url: Any, timeout_seconds: float = 8.0, hash_size: int = 8) -> str:
-    normalized = str(url or "").strip()
-    if not normalized:
+# =========================
+# URL (ASYNC)
+# =========================
+async def compute_hash_from_url(url: str, timeout: float = 6.0) -> str:
+    if not url:
         return ""
 
-    cached = _cache_get(normalized)
+    cached = _cache_get(url)
     if cached:
         return cached
 
     try:
-        response = requests.get(normalized, timeout=timeout_seconds)
-        response.raise_for_status()
-        pixel_hash = compute_pixel_hash_from_bytes(response.content, hash_size=hash_size)
-        if pixel_hash:
-            _cache_set(normalized, pixel_hash)
-        return pixel_hash
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+            h = compute_hash_from_bytes(resp.content)
+
+            if h:
+                _cache_set(url, h)
+
+            return h
+
     except Exception:
         return ""
 
 
-def hamming_distance_hex(left: Any, right: Any):
-    l = str(left or "").strip().lower()
-    r = str(right or "").strip().lower()
-    if not l or not r:
+# =========================
+# HAMMING DISTANCE
+# =========================
+def hamming_distance(h1: str, h2: str) -> Optional[int]:
+    if not h1 or not h2 or len(h1) != len(h2):
         return None
-    if len(l) != len(r):
-        return None
+
     try:
-        return (int(l, 16) ^ int(r, 16)).bit_count()
+        return (int(h1, 16) ^ int(h2, 16)).bit_count()
     except Exception:
         return None

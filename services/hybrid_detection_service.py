@@ -1,13 +1,13 @@
 import io
 import uuid
 import asyncio
+import base64
+import os
 from typing import List, Dict
 
-import torch
 import numpy as np
+import requests
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-
 import mediapipe as mp
 
 from services.bg_service import remove_bg_bytes
@@ -20,22 +20,10 @@ from services.r2_storage import R2Storage
 MAX_ITEMS = 5
 RESIZE_LIMIT = 640
 
+HF_TOKEN = os.getenv("HF_TOKEN")
+HF_URL = "https://api-inference.huggingface.co/models/IDEA-Research/grounding-dino-tiny"
 
-# =========================
-# INIT MODEL (GROUNDING DINO TINY)
-# =========================
-device = torch.device("cpu")
-
-processor = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny")
-model = AutoModelForZeroShotObjectDetection.from_pretrained(
-    "IDEA-Research/grounding-dino-tiny"
-)
-
-model.to(device)
-model.eval()
-
-
-TEXT_PROMPT = "shirt . pants . dress . saree . kurta . watch ."
+TEXT_PROMPT = "shirt . pants . dress . saree . kurta . watch . shoes . bag"
 
 
 # =========================
@@ -50,40 +38,72 @@ def resize_image(image: Image.Image):
     return image.resize((int(w * scale), int(h * scale)))
 
 
+def image_to_base64(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 # =========================
-# DETECTION (DINO)
+# HF DETECTION
 # =========================
-def detect_items(image: Image.Image):
-    inputs = processor(images=image, text=TEXT_PROMPT, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+def hf_detect(image: Image.Image):
+    if not HF_TOKEN:
+        print("[HF] token missing ❌")
+        return []
 
-    with torch.inference_mode():
-        outputs = model(**inputs)
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-    results = processor.post_process_object_detection(
-        outputs,
-        threshold=0.35,
-        target_sizes=[image.size[::-1]]
-    )[0]
+    image_b64 = image_to_base64(image)
 
+    try:
+        res = requests.post(
+            HF_URL,
+            headers=headers,
+            json={
+                "inputs": {
+                    "image": image_b64,
+                    "text": TEXT_PROMPT
+                }
+            },
+            timeout=20
+        )
+
+        print("[HF STATUS]", res.status_code)
+
+        if res.status_code != 200:
+            print("[HF ERROR]", res.text)
+            return []
+
+        return res.json()
+
+    except Exception as e:
+        print("[HF EXCEPTION]", e)
+        return []
+
+
+def parse_detections(hf_output):
     detections = []
 
-    for score, label, box in zip(
-        results["scores"],
-        results["labels"],
-        results["boxes"]
-    ):
+    for item in hf_output:
+        box = item.get("box", {})
+
         detections.append({
-            "label": processor.tokenizer.decode([label]).strip(),
-            "bbox": box.tolist(),
-            "score": float(score)
+            "label": item.get("label"),
+            "bbox": [
+                int(box.get("xmin", 0)),
+                int(box.get("ymin", 0)),
+                int(box.get("xmax", 0)),
+                int(box.get("ymax", 0)),
+            ],
+            "score": float(item.get("score", 0))
         })
 
     return detections
 
 
 # =========================
-# MEDIAPIPE
+# MEDIAPIPE (ACCESSORIES BOOST)
 # =========================
 mp_face = mp.solutions.face_mesh
 mp_pose = mp.solutions.pose
@@ -99,8 +119,7 @@ def get_regions(image_np):
             lm = res.multi_face_landmarks[0]
             x = int(lm.landmark[234].x * w)
             y = int(lm.landmark[234].y * h)
-
-            regions.append({"label": "earring", "bbox": [x-40, y-40, x+40, y+40]})
+            regions.append({"label": "earring", "bbox": [x-40, y-40, x+40, y+40], "score": 0.9})
 
     with mp_pose.Pose(static_image_mode=True) as pose:
         res = pose.process(image_np)
@@ -108,14 +127,13 @@ def get_regions(image_np):
             wrist = res.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_WRIST]
             x = int(wrist.x * w)
             y = int(wrist.y * h)
-
-            regions.append({"label": "watch", "bbox": [x-50, y-50, x+50, y+50]})
+            regions.append({"label": "watch", "bbox": [x-50, y-50, x+50, y+50], "score": 0.9})
 
     return regions
 
 
 # =========================
-# IOU DEDUP
+# IOU + FILTER
 # =========================
 def iou(box1, box2):
     x1 = max(box1[0], box2[0])
@@ -124,11 +142,9 @@ def iou(box1, box2):
     y2 = min(box1[3], box2[3])
 
     inter = max(0, x2 - x1) * max(0, y2 - y1)
+    union = ((box1[2]-box1[0])*(box1[3]-box1[1]) +
+             (box2[2]-box2[0])*(box2[3]-box2[1]) - inter)
 
-    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-
-    union = area1 + area2 - inter
     return inter / union if union else 0
 
 
@@ -136,7 +152,7 @@ def filter_and_limit(detections, width, height):
     filtered = []
 
     for d in detections:
-        x1, y1, x2, y2 = map(int, d["bbox"])
+        x1, y1, x2, y2 = d["bbox"]
 
         if (x2 - x1) < 30 or (y2 - y1) < 30:
             continue
@@ -145,21 +161,17 @@ def filter_and_limit(detections, width, height):
         if area > 0.9 * width * height:
             continue
 
-        duplicate = False
-        for f in filtered:
-            if iou(f["bbox"], d["bbox"]) > 0.7:
-                duplicate = True
-                break
+        if any(iou(f["bbox"], d["bbox"]) > 0.7 for f in filtered):
+            continue
 
-        if not duplicate:
-            filtered.append(d)
+        filtered.append(d)
 
     filtered.sort(key=lambda x: x["score"], reverse=True)
     return filtered[:MAX_ITEMS]
 
 
 # =========================
-# BATCH BG REMOVAL
+# BG REMOVAL
 # =========================
 async def batch_bg(crops):
     return await asyncio.gather(
@@ -179,13 +191,18 @@ async def run_hybrid_detection(image: Image.Image):
     r2 = R2Storage()
 
     # -------------------------
-    # DETECTION
+    # HF DETECTION
     # -------------------------
-    detections = detect_items(image)
+    hf_output = hf_detect(image)
+    detections = parse_detections(hf_output)
+
+    # add mediapipe intelligence
+    detections.extend(get_regions(image_np))
+
     detections = filter_and_limit(detections, width, height)
 
-    # add mediapipe
-    detections.extend(get_regions(image_np))
+    if not detections:
+        return []
 
     # -------------------------
     # CROPS
@@ -195,7 +212,6 @@ async def run_hybrid_detection(image: Image.Image):
 
     for d in detections:
         x1, y1, x2, y2 = map(int, d["bbox"])
-
         crop = image.crop((x1, y1, x2, y2))
 
         buf = io.BytesIO()
@@ -205,12 +221,12 @@ async def run_hybrid_detection(image: Image.Image):
         meta.append(d)
 
     # -------------------------
-    # BG REMOVAL (BATCH)
+    # BG REMOVAL
     # -------------------------
     masked_list = await batch_bg(crops)
 
     # -------------------------
-    # UPLOAD (PARALLEL)
+    # UPLOAD
     # -------------------------
     async def upload_one(raw, masked, label):
         file_id = str(uuid.uuid4())
@@ -229,7 +245,10 @@ async def run_hybrid_detection(image: Image.Image):
         }
 
     results = await asyncio.gather(
-        *[upload_one(r, m, meta[i]["label"]) for i, (r, m) in enumerate(zip(crops, masked_list))]
+        *[
+            upload_one(crops[i], masked_list[i], meta[i]["label"])
+            for i in range(len(crops))
+        ]
     )
 
     return results

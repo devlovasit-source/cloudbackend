@@ -25,7 +25,6 @@ def _cache_set(url: str, value: str):
     _URL_HASH_CACHE[url] = value
 
     if len(_URL_HASH_CACHE) > _URL_HASH_CACHE_MAX:
-        # remove oldest
         _URL_HASH_CACHE.pop(next(iter(_URL_HASH_CACHE)), None)
 
 
@@ -52,8 +51,8 @@ def _foreground_crop(img):
         ys, xs = np.where(alpha > 10)
 
         if len(xs) and len(ys):
-            x1, x2 = xs.min(), xs.max() + 1
-            y1, y2 = ys.min(), ys.max() + 1
+            x1, x2 = int(xs.min()), int(xs.max()) + 1
+            y1, y2 = int(ys.min()), int(ys.max()) + 1
             return img[y1:y2, x1:x2, :3]
 
         return img[:, :, :3]
@@ -62,7 +61,7 @@ def _foreground_crop(img):
 
 
 # =========================
-# CORE HASH FUNCTION
+# CORE HASH FUNCTION (DHash)
 # =========================
 def compute_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
     try:
@@ -85,14 +84,16 @@ def compute_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
         for b in bits:
             value = (value << 1) | int(b)
 
-        return hex(value)[2:]
+        # 🔥 FIX: pad hex properly (consistent length)
+        width = (size * size + 3) // 4
+        return f"{value:0{width}x}"
 
     except Exception:
         return ""
 
 
 # =========================
-# BASE64 (OPTIONAL)
+# BASE64
 # =========================
 def compute_hash_from_base64(value: Any) -> str:
     text = str(value or "").strip()
@@ -138,13 +139,23 @@ async def compute_hash_from_url(url: str, timeout: float = 6.0) -> str:
 
 
 # =========================
-# HAMMING DISTANCE
+# 🔥 HAMMING DISTANCE (HEX SAFE)
 # =========================
-def hamming_distance(h1: str, h2: str) -> Optional[int]:
-    if not h1 or not h2 or len(h1) != len(h2):
+def hamming_distance_hex(h1: Any, h2: Any) -> Optional[int]:
+    a = str(h1 or "").strip().lower()
+    b = str(h2 or "").strip().lower()
+
+    if not a or not b or len(a) != len(b):
         return None
 
     try:
-        return (int(h1, 16) ^ int(h2, 16)).bit_count()
+        return (int(a, 16) ^ int(b, 16)).bit_count()
     except Exception:
         return None
+
+
+# =========================
+# BACKWARD COMPATIBILITY
+# =========================
+def hamming_distance(h1: str, h2: str) -> Optional[int]:
+    return hamming_distance_hex(h1, h2)

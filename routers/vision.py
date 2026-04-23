@@ -3,7 +3,7 @@ import io
 import asyncio
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 from PIL import Image
 
@@ -11,6 +11,7 @@ from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_url
 from services.qdrant_service import qdrant_service
 from services import ai_gateway
+from services.auth_service import get_current_user  # 🔥 IMPORTANT
 
 router = APIRouter()
 
@@ -32,7 +33,6 @@ def get_detection_service():
 # =========================
 class ImageAnalyzeRequest(BaseModel):
     image_base64: str = Field(..., min_length=20)
-    userId: str = "demo_user"
 
 
 # =========================
@@ -144,9 +144,6 @@ async def _process_single_item(item: dict, user_id: str):
 # =========================
 async def process_items(image: Image.Image, user_id: str):
 
-    # =========================
-    # DETECTION (SAFE)
-    # =========================
     detections = []
 
     try:
@@ -169,9 +166,6 @@ async def process_items(image: Image.Image, user_id: str):
             },
         }
 
-    # =========================
-    # PARALLEL PROCESSING
-    # =========================
     tasks = [_process_single_item(item, user_id) for item in detections]
     results = await asyncio.gather(*tasks)
 
@@ -188,14 +182,19 @@ async def process_items(image: Image.Image, user_id: str):
 
 
 # =========================
-# ROUTE
+# ROUTE (🔥 PRODUCTION READY)
 # =========================
 @router.post("/analyze-image")
-async def analyze_image(request: ImageAnalyzeRequest):
+async def analyze_image(
+    request: ImageAnalyzeRequest,
+    user=Depends(get_current_user),  # 🔥 AUTH HERE
+):
+
+    user_id = user["user_id"]  # 🔥 SAFE
 
     image = _decode_pil_image(request.image_base64)
 
-    result = await process_items(image, request.userId)
+    result = await process_items(image, user_id)
 
     return {
         "success": True,

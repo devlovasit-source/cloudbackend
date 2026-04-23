@@ -1,9 +1,11 @@
 import base64
 import io
 import asyncio
-from typing import List, Optional
+import hashlib
+import json
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+import httpx
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from PIL import Image
 
@@ -11,21 +13,16 @@ from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_url
 from services.qdrant_service import qdrant_service
 from services import ai_gateway
-from services.appwrite_service import get_current_user  # 🔥 IMPORTANT
+from services.auth_service import get_current_user
+from services.security_limits import get_redis_client
+
 
 router = APIRouter()
 
-
-# =========================
-# LAZY DETECTION LOADER 🔥
-# =========================
-def get_detection_service():
-    try:
-        from services.hybrid_detection_service import run_hybrid_detection
-        return run_hybrid_detection
-    except Exception as e:
-        print("[vision] detection unavailable:", e)
-        return None
+# 🔥 CONFIG
+RUNPOD_URL = "https://your-runpod-endpoint"  # replace
+AI_CACHE_TTL = 86400
+SEM = asyncio.Semaphore(5)
 
 
 # =========================
@@ -38,163 +35,184 @@ class ImageAnalyzeRequest(BaseModel):
 # =========================
 # HELPERS
 # =========================
-def _normalize_base64(value: str) -> str:
-    return value.split(",", 1)[1] if "," in value else value
-
-
-def _decode_pil_image(image_base64: str) -> Image.Image:
+def _decode_image(value: str) -> Image.Image:
     try:
-        base64_data = _normalize_base64(image_base64)
-        image_bytes = base64.b64decode(base64_data)
-        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if "," in value:
+            value = value.split(",", 1)[1]
+        return Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image")
 
 
 # =========================
-# PROCESS SINGLE ITEM
+# 🔴 REDIS AI CACHE
 # =========================
-async def _process_single_item(item: dict, user_id: str):
-    try:
-        item_id = item.get("item_id")
-        masked_url = item.get("masked_url")
+def _ai_key(url: str):
+    return "ai:" + hashlib.md5(url.encode()).hexdigest()
 
-        final_data = {
-            "category": item.get("label"),
-            "image_url": item.get("raw_url"),
-            "masked_url": masked_url,
-            "userId": user_id,
-            "image_id": item_id,
-        }
 
-        loop = asyncio.get_running_loop()
+async def _get_ai(masked_url: str):
+    redis = await get_redis_client()
+    key = _ai_key(masked_url)
 
-        # =========================
-        # AI ENRICHMENT
-        # =========================
-        ai_data = {}
-
+    if redis:
         try:
-            if final_data["category"] not in ["ring", "earring", "bracelet"]:
-                ai_data, _ = await loop.run_in_executor(
-                    None,
-                    lambda: ai_gateway.ollama_vision_json(
-                        prompt="Describe fashion attributes",
-                        image_base64=masked_url,
-                        usecase="vision",
-                    ),
-                )
-        except Exception as e:
-            print("[vision] AI error:", e)
+            cached = await redis.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
 
-        final_data.update({
-            "pattern": ai_data.get("pattern"),
-            "occasions": ai_data.get("occasions"),
-            "style": ai_data.get("style"),
-        })
+    loop = asyncio.get_running_loop()
 
-        # =========================
-        # EMBEDDINGS
-        # =========================
-        text_future = loop.run_in_executor(None, encode_metadata, final_data)
-        image_future = loop.run_in_executor(None, encode_image_url, masked_url)
+    try:
+        ai, _ = await loop.run_in_executor(
+            None,
+            lambda: ai_gateway.ollama_vision_json(
+                prompt="Describe fashion attributes",
+                image_base64=masked_url,
+                usecase="vision",
+            ),
+        )
+    except Exception:
+        ai = {}
 
-        text_vector, image_vector = await asyncio.gather(text_future, image_future)
+    if redis and ai:
+        try:
+            await redis.setex(key, AI_CACHE_TTL, json.dumps(ai))
+        except Exception:
+            pass
 
-        if text_vector and image_vector:
-            vector = [(0.6 * iv + 0.4 * tv) for iv, tv in zip(image_vector, text_vector)]
-        else:
-            vector = image_vector or text_vector or []
-
-        # =========================
-        # SEARCH
-        # =========================
-        similar_items = []
-        if vector:
-            similar_items = qdrant_service.search_similar(vector, user_id, limit=5)
-
-        # =========================
-        # SAVE
-        # =========================
-        if vector:
-            await loop.run_in_executor(
-                None,
-                lambda: qdrant_service.upsert_item(
-                    item_id=item_id,
-                    vector=vector,
-                    payload=final_data,
-                ),
-            )
-
-        return {
-            "item_id": item_id,
-            "category": final_data.get("category"),
-            "image_url": final_data.get("image_url"),
-            "masked_url": final_data.get("masked_url"),
-            "similar_items": similar_items,
-        }
-
-    except Exception as e:
-        print("[vision] item failed:", e)
-        return None
+    return ai
 
 
 # =========================
-# MAIN PIPELINE
+# ⚡ GPU DETECTION (RUNPOD)
+# =========================
+async def _detect(image: Image.Image):
+    try:
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG")
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.post(
+                RUNPOD_URL,
+                files={"file": buf.getvalue()},
+            )
+            return res.json()
+    except Exception as e:
+        print("[DETECTION ERROR]", e)
+        return []
+
+
+# =========================
+# 🧠 BATCH EMBEDDINGS
+# =========================
+async def _batch_embeddings(items):
+    loop = asyncio.get_running_loop()
+
+    text_tasks = [
+        loop.run_in_executor(None, encode_metadata, i)
+        for i in items
+    ]
+
+    image_tasks = [
+        loop.run_in_executor(None, encode_image_url, i["masked_url"])
+        for i in items
+    ]
+
+    tvs = await asyncio.gather(*text_tasks)
+    ivs = await asyncio.gather(*image_tasks)
+
+    vectors = []
+
+    for tv, iv in zip(tvs, ivs):
+        if tv and iv:
+            vec = [(0.6*i + 0.4*t) for i, t in zip(iv, tv)]
+        else:
+            vec = iv or tv or []
+        vectors.append(vec)
+
+    return vectors
+
+
+# =========================
+# PROCESS PIPELINE
 # =========================
 async def process_items(image: Image.Image, user_id: str):
 
-    detections = []
-
-    try:
-        run_hybrid_detection = get_detection_service()
-
-        if run_hybrid_detection:
-            detections = await run_hybrid_detection(image)
-        else:
-            print("[vision] detection disabled")
-    except Exception as e:
-        print("[vision] detection failed:", e)
+    detections = await _detect(image)
 
     if not detections:
-        return {
-            "items": [],
-            "meta": {
-                "bg_removed": True,
-                "bg_error": None,
-                "detection": "disabled_or_failed"
-            },
-        }
+        return {"items": [], "meta": {"detection": "failed"}}
 
-    tasks = [_process_single_item(item, user_id) for item in detections]
-    results = await asyncio.gather(*tasks)
+    # prepare items
+    items = []
+    for d in detections:
+        items.append({
+            "category": d.get("label"),
+            "image_url": d.get("raw_url"),
+            "masked_url": d.get("masked_url"),
+            "user_id": user_id,
+            "image_id": d.get("item_id"),
+        })
 
-    results = [r for r in results if r]
+    # 🔴 AI (parallel + cached)
+    async def enrich(item):
+        if item["category"] not in ["ring", "earring", "bracelet"]:
+            ai = await _get_ai(item["masked_url"])
+            item.update({
+                "pattern": ai.get("pattern"),
+                "occasions": ai.get("occasions"),
+                "style": ai.get("style"),
+            })
+        return item
+
+    items = await asyncio.gather(*[enrich(i) for i in items])
+
+    # 🧠 batch embeddings
+    vectors = await _batch_embeddings(items)
+
+    results = []
+
+    for item, vector in zip(items, vectors):
+        similar = qdrant_service.search_similar(vector, user_id, 5) if vector else []
+
+        if vector:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: qdrant_service.upsert_item(
+                    item_id=item["image_id"],
+                    vector=vector,
+                    payload=item,
+                ),
+            )
+
+        results.append({
+            "item_id": item["image_id"],
+            "category": item["category"],
+            "image_url": item["image_url"],
+            "masked_url": item["masked_url"],
+            "similar_items": similar,
+        })
 
     return {
         "items": results,
-        "meta": {
-            "bg_removed": True,
-            "bg_error": None,
-            "detection": "success"
-        },
+        "meta": {"detection": "success"}
     }
 
 
 # =========================
-# ROUTE (🔥 PRODUCTION READY)
+# ROUTE
 # =========================
 @router.post("/analyze-image")
 async def analyze_image(
     request: ImageAnalyzeRequest,
-    user=Depends(get_current_user),  # 🔥 AUTH HERE
+    user=Depends(get_current_user),
 ):
+    image = _decode_image(request.image_base64)
 
-    user_id = user["user_id"]  # 🔥 SAFE
-
-    image = _decode_pil_image(request.image_base64)
-
-    result = await process_items(image, user_id)
+    result = await process_items(image, user["user_id"])
 
     return {
         "success": True,

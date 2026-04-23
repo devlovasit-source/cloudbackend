@@ -14,3 +14,4 @@ opencv-python-headless==4.10.0.84
 scikit-learn==1.5.2
 Pillow==11.0.0
 firebase-admin==6.6.0
+mediapipe==0.10.14

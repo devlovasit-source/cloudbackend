@@ -6,6 +6,10 @@ import os
 import logging
 import time
 import concurrent.futures
+<<<<<<< HEAD
+=======
+import threading
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 from deep_translator import GoogleTranslator
 
@@ -32,6 +36,11 @@ logger = logging.getLogger("ahvi.routers.chat")
 
 _CHAT_CACHE = {}
 _WEATHER_CACHE = {}
+<<<<<<< HEAD
+=======
+_CHAT_CACHE_LOCK = threading.Lock()
+_WEATHER_CACHE_LOCK = threading.Lock()
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 _CHAT_CACHE_MAX_ITEMS = max(64, int(os.getenv("CHAT_CACHE_MAX_ITEMS", "512")))
 _CHAT_CACHE_TTL_SECONDS = max(15, int(os.getenv("CHAT_CACHE_TTL_SECONDS", "60")))
 _WEATHER_CACHE_TTL_SECONDS = max(60, int(os.getenv("WEATHER_CACHE_TTL_SECONDS", "900")))
@@ -51,6 +60,7 @@ def _cache_key(text, user_id):
     return f"{user_id}:{text.lower().strip()}"
 
 def _get_cached(cache, key, ttl=60):
+<<<<<<< HEAD
     item = cache.get(key)
     if not item:
         return None
@@ -68,6 +78,27 @@ def _set_cache(cache, key, value):
         oldest_key = min(cache.items(), key=lambda kv: float(kv[1].get("time") or 0.0))[0]
         cache.pop(oldest_key, None)
     cache[key] = {"value": value, "time": time.time()}
+=======
+    with _CHAT_CACHE_LOCK:
+        item = cache.get(key)
+        if not item:
+            return None
+        if time.time() - item["time"] > ttl:
+            cache.pop(key, None)
+            return None
+        return item["value"]
+
+def _set_cache(cache, key, value):
+    with _CHAT_CACHE_LOCK:
+        now = time.time()
+        stale_keys = [k for k, v in cache.items() if now - float(v.get("time") or 0.0) > _CHAT_CACHE_TTL_SECONDS]
+        for k in stale_keys:
+            cache.pop(k, None)
+        if len(cache) >= _CHAT_CACHE_MAX_ITEMS:
+            oldest_key = min(cache.items(), key=lambda kv: float(kv[1].get("time") or 0.0))[0]
+            cache.pop(oldest_key, None)
+        cache[key] = {"value": value, "time": time.time()}
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 
 def _weather_cache_key(lat: Any, lon: Any) -> str:
@@ -76,6 +107,7 @@ def _weather_cache_key(lat: Any, lon: Any) -> str:
 
 def _get_weather_cached(lat: Any, lon: Any) -> Dict[str, Any]:
     key = _weather_cache_key(lat, lon)
+<<<<<<< HEAD
     item = _WEATHER_CACHE.get(key)
     now = time.time()
     if item and (now - float(item.get("time") or 0.0)) <= _WEATHER_CACHE_TTL_SECONDS:
@@ -85,6 +117,23 @@ def _get_weather_cached(lat: Any, lon: Any) -> Dict[str, Any]:
     if len(_WEATHER_CACHE) > 256:
         oldest_key = min(_WEATHER_CACHE.items(), key=lambda kv: float(kv[1].get("time") or 0.0))[0]
         _WEATHER_CACHE.pop(oldest_key, None)
+=======
+    now = time.time()
+
+    with _WEATHER_CACHE_LOCK:
+        item = _WEATHER_CACHE.get(key)
+        if item and (now - float(item.get("time") or 0.0)) <= _WEATHER_CACHE_TTL_SECONDS:
+            return dict(item.get("value") or {})
+
+    weather = get_hourly_weather(lat=float(lat), lon=float(lon))
+
+    with _WEATHER_CACHE_LOCK:
+        _WEATHER_CACHE[key] = {"value": weather, "time": time.time()}
+        if len(_WEATHER_CACHE) > 256:
+            oldest_key = min(_WEATHER_CACHE.items(), key=lambda kv: float(kv[1].get("time") or 0.0))[0]
+            _WEATHER_CACHE.pop(oldest_key, None)
+
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     return weather
 
 def _build_history(messages: List["Message"]) -> List[Dict[str, Any]]:
@@ -430,7 +479,15 @@ def text_chat(request: TextChatRequest, http_request: Request):
     # -------------------------
     try:
         if target_lang != "en" and message:
+<<<<<<< HEAD
             message = GoogleTranslator(source="en", target=target_lang).translate(message)
+=======
+            lower_msg = message.strip().lower()
+            if lower_msg in ("hi", "hello", "hey", "hi there", "hello there"):
+                pass
+            else:
+                message = GoogleTranslator(source="en", target=target_lang).translate(message)
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     except Exception:
         pass
 

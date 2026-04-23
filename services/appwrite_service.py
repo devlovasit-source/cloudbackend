@@ -29,7 +29,10 @@ client.set_project(
         "APPWRITE_PROJECT_ID",
         "APPWRITE_PROJECT",
         "EXPO_PUBLIC_APPWRITE_PROJECT_ID",
+<<<<<<< HEAD
         default="69958f25003190519213",
+=======
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     )
 )
 
@@ -55,7 +58,10 @@ def _build_client() -> Client:
             "APPWRITE_PROJECT_ID",
             "APPWRITE_PROJECT",
             "EXPO_PUBLIC_APPWRITE_PROJECT_ID",
+<<<<<<< HEAD
             default="69958f25003190519213",
+=======
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
         )
     )
     if _appwrite_api_key:

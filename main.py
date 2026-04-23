@@ -91,11 +91,19 @@ reddit_router = _load_optional_router("routers.reddit")
 bg_router = None
 if os.getenv("ENABLE_BG_REMOVER", "false").lower() in ("1", "true", "yes"):
     if all(_has_module(m) for m in ["transformers", "torch", "PIL"]):
+<<<<<<< HEAD
         bg_router = _load_optional_router("routers.bg_remover")
     else:
         _mark_router_skipped("routers.bg_remover", "missing_dependency")
 else:
     _mark_router_skipped("routers.bg_remover", "feature_flag_disabled")
+=======
+        bg_router = _load_optional_router("routers.bg_router")
+    else:
+        _mark_router_skipped("routers.bg_router", "missing_dependency")
+else:
+    _mark_router_skipped("routers.bg_router", "feature_flag_disabled")
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 vision_router = None
 if os.getenv("ENABLE_VISION", "false").lower() in ("1", "true", "yes"):
@@ -107,7 +115,11 @@ else:
     _mark_router_skipped("routers.vision", "feature_flag_disabled")
 
 wardrobe_capture_router = None
+<<<<<<< HEAD
 if os.getenv("ENABLE_VISION", "false").lower() in ("1", "true", "yes"):
+=======
+if os.getenv("ENABLE_WARDROBE_CAPTURE", "false").lower() in ("1", "true", "yes"):
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     if all(_has_module(m) for m in ["numpy", "PIL"]):
         wardrobe_capture_router = _load_optional_router("routers.wardrobe_capture")
     else:
@@ -530,6 +542,7 @@ class BgCompatRequest(BaseModel):
 @app.post("/api/background/remove-bg")
 @app.post("/api/remove-bg")
 def remove_bg_compat(payload: BgCompatRequest):
+<<<<<<< HEAD
     """
     Always expose background-removal endpoint even when optional router gating
     prevents router mounting. This keeps frontend flow stable.
@@ -566,6 +579,24 @@ def remove_bg_compat(payload: BgCompatRequest):
         },
     )
     return result
+=======
+    try:
+        from services.bg_service import remove_bg_bytes
+        import base64
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"BG remover unavailable: {exc}")
+
+    try:
+        image_bytes = base64.b64decode(payload.image_base64.split(",")[-1])
+        result_bytes = remove_bg_bytes(image_bytes)
+        return {
+            "success": True,
+            "bg_removed": True,
+            "image_base64": base64.b64encode(result_bytes).decode(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Background removal failed: {exc}")
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 
 class VisionCompatRequest(BaseModel):
@@ -574,6 +605,7 @@ class VisionCompatRequest(BaseModel):
     userId: str | None = None
 
 
+<<<<<<< HEAD
 @app.post("/api/analyze-image")
 @app.post("/api/vision/analyze-image")
 @app.post("/api/vision/analyze")
@@ -633,6 +665,18 @@ def analyze_compat(payload: VisionCompatRequest):
             "bg_removed": meta.get("bg_removed"),
         },
     }
+=======
+if not vision_router:
+    @app.post("/api/analyze-image")
+    @app.post("/api/vision/analyze-image")
+    @app.post("/api/vision/analyze")
+    @app.post("/api/analyze")
+    def analyze_compat(payload: VisionCompatRequest):
+        raise HTTPException(
+            status_code=503,
+            detail="Vision analyzer is currently disabled on this server.",
+        )
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 @app.get("/")
 def root():
     return {"message": "AHVI backend running"}
@@ -647,10 +691,27 @@ async def health_check():
     ]
     redis_ready = await is_redis_rate_limit_ready()
     qdrant_ready = bool(getattr(qdrant_service, "client", None))
+<<<<<<< HEAD
     appwrite_configured = all(
         str(os.getenv(key, "")).strip()
         for key in ("APPWRITE_ENDPOINT", "APPWRITE_PROJECT_ID", "APPWRITE_DATABASE_ID")
     )
+=======
+    appwrite_endpoint = str(
+        os.getenv("APPWRITE_ENDPOINT", "")
+        or os.getenv("EXPO_PUBLIC_APPWRITE_ENDPOINT", "")
+    ).strip()
+    appwrite_project = str(
+        os.getenv("APPWRITE_PROJECT_ID", "")
+        or os.getenv("APPWRITE_PROJECT", "")
+        or os.getenv("EXPO_PUBLIC_APPWRITE_PROJECT_ID", "")
+    ).strip()
+    appwrite_database = str(
+        os.getenv("APPWRITE_DATABASE_ID", "")
+        or os.getenv("EXPO_PUBLIC_APPWRITE_DATABASE_ID", "")
+    ).strip()
+    appwrite_configured = all((appwrite_endpoint, appwrite_project, appwrite_database))
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     celery_ready = bool(celery_app and AsyncResult is not None)
 
     ready = not required_router_failures

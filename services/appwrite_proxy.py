@@ -372,7 +372,11 @@ class AppwriteProxy:
         candidate_keys: List[str] = []
         if user_field:
             candidate_keys.append(user_field)
+<<<<<<< HEAD
         for alias in ("userId", "userid", "user_id"):
+=======
+        for alias in ("userId",):
+>>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
             if alias not in candidate_keys:
                 candidate_keys.append(alias)
         for key in candidate_keys:

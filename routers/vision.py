@@ -11,7 +11,7 @@ from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_url
 from services.qdrant_service import qdrant_service
 from services import ai_gateway
-from services.auth_service import get_current_user  # 🔥 IMPORTANT
+from services.appwrite_service import get_current_user  # 🔥 IMPORTANT
 
 router = APIRouter()
 

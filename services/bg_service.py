@@ -151,3 +151,14 @@ async def remove_bg_bytes(image_bytes: bytes) -> bytes:
         # 🔓 always release lock
         if has_lock:
             await _release_lock(lock_key)
+# =========================
+# BACKWARD COMPATIBILITY
+# =========================
+
+async def remove_bg_external(image_bytes: bytes) -> bytes:
+    return await remove_bg_bytes(image_bytes)
+
+
+def remove_bg_external_sync(image_bytes: bytes) -> bytes:
+    import asyncio
+    return asyncio.run(remove_bg_bytes(image_bytes))

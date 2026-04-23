@@ -2,9 +2,10 @@ import base64
 import asyncio
 from typing import Any, Optional
 
-import cv2
 import numpy as np
 import httpx
+from PIL import Image
+import io
 
 
 # =========================
@@ -29,35 +30,37 @@ def _cache_set(url: str, value: str):
 
 
 # =========================
-# IMAGE DECODE
+# IMAGE DECODE (PIL)
 # =========================
 def _decode_bytes(image_bytes: bytes):
     if not image_bytes:
         return None
 
-    arr = np.frombuffer(image_bytes, np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    try:
+        return Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    except Exception:
+        return None
 
 
-def _foreground_crop(img):
+def _foreground_crop(img: Image.Image):
     if img is None:
         return None
 
-    if img.ndim == 2:
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    img_np = np.array(img)
 
-    if img.shape[2] == 4:
-        alpha = img[:, :, 3]
+    # Handle alpha channel
+    if img_np.shape[-1] == 4:
+        alpha = img_np[:, :, 3]
         ys, xs = np.where(alpha > 10)
 
         if len(xs) and len(ys):
             x1, x2 = int(xs.min()), int(xs.max()) + 1
             y1, y2 = int(ys.min()), int(ys.max()) + 1
-            return img[y1:y2, x1:x2, :3]
+            img_np = img_np[y1:y2, x1:x2]
 
-        return img[:, :, :3]
+        img_np = img_np[:, :, :3]
 
-    return img[:, :, :3]
+    return Image.fromarray(img_np)
 
 
 # =========================
@@ -66,17 +69,19 @@ def _foreground_crop(img):
 def compute_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
     try:
         img = _decode_bytes(image_bytes)
-        crop = _foreground_crop(img)
+        img = _foreground_crop(img)
 
-        if crop is None or crop.size == 0:
+        if img is None:
             return ""
 
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = img.convert("L")
+        resized = gray.resize((size + 1, size), Image.Resampling.LANCZOS)
 
-        resized = cv2.resize(gray, (size + 1, size), interpolation=cv2.INTER_AREA)
-        diff = resized[:, 1:] > resized[:, :-1]
+        pixels = np.array(resized)
 
+        diff = pixels[:, 1:] > pixels[:, :-1]
         bits = diff.flatten()
+
         if bits.size == 0:
             return ""
 
@@ -84,7 +89,6 @@ def compute_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
         for b in bits:
             value = (value << 1) | int(b)
 
-        # 🔥 FIX: pad hex properly (consistent length)
         width = (size * size + 3) // 4
         return f"{value:0{width}x}"
 
@@ -139,7 +143,7 @@ async def compute_hash_from_url(url: str, timeout: float = 6.0) -> str:
 
 
 # =========================
-# 🔥 HAMMING DISTANCE (HEX SAFE)
+# HAMMING DISTANCE
 # =========================
 def hamming_distance_hex(h1: Any, h2: Any) -> Optional[int]:
     a = str(h1 or "").strip().lower()
@@ -153,10 +157,10 @@ def hamming_distance_hex(h1: Any, h2: Any) -> Optional[int]:
     except Exception:
         return None
 
-# =========================
-# 🔥 BACKWARD COMPATIBILITY (FINAL FIX)
-# =========================
 
+# =========================
+# BACKWARD COMPATIBILITY
+# =========================
 def compute_pixel_hash_from_bytes(image_bytes: bytes, size: int = 8) -> str:
     return compute_hash_from_bytes(image_bytes, size)
 

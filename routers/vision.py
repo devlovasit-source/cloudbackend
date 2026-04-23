@@ -7,21 +7,14 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from PIL import Image
-import requests
 
 from services.hybrid_detection_service import run_hybrid_detection
 from services.embedding_service import encode_metadata
-from services.image_embedding_service import encode_image_base64
+from services.image_embedding_service import encode_image_url
 from services.qdrant_service import qdrant_service
 from services import ai_gateway
 
 router = APIRouter()
-
-# =========================
-# CONFIG
-# =========================
-HF_API_KEY = os.getenv("HF_API_KEY")
-HF_BG_MODEL = "briaai/RMBG-2.0"
 
 # =========================
 # REQUEST
@@ -30,11 +23,13 @@ class ImageAnalyzeRequest(BaseModel):
     image_base64: str = Field(..., min_length=20)
     userId: str = "demo_user"
 
+
 # =========================
 # HELPERS
 # =========================
 def _normalize_base64(value: str) -> str:
     return value.split(",", 1)[1] if "," in value else value
+
 
 def _decode_pil_image(image_base64: str) -> Image.Image:
     try:
@@ -44,35 +39,9 @@ def _decode_pil_image(image_base64: str) -> Image.Image:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image")
 
-# =========================
-# 🔥 HF BG REMOVAL (sync, offloaded later)
-# =========================
-def _remove_bg_hf_sync(image_base64: str):
-    if not HF_API_KEY:
-        return image_base64, False, "no_api_key"
-
-    try:
-        headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-        img_bytes = base64.b64decode(_normalize_base64(image_base64))
-
-        res = requests.post(
-            f"https://api-inference.huggingface.co/models/{HF_BG_MODEL}",
-            headers=headers,
-            data=img_bytes,
-            timeout=20,
-        )
-
-        if res.status_code != 200:
-            return image_base64, False, "hf_failed"
-
-        return base64.b64encode(res.content).decode(), True, None
-
-    except Exception as e:
-        print("[vision] bg removal error:", e)
-        return image_base64, False, "exception"
 
 # =========================
-# 🔥 PROCESS SINGLE ITEM (PARALLEL UNIT)
+# 🔥 PROCESS SINGLE ITEM
 # =========================
 async def _process_single_item(item: dict, user_id: str):
     try:
@@ -87,15 +56,14 @@ async def _process_single_item(item: dict, user_id: str):
             "image_id": item_id,
         }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # =========================
-        # 🔥 AI ENRICHMENT (NON-BLOCKING)
+        # 🔥 AI ENRICHMENT
         # =========================
         ai_data = {}
 
         try:
-            # Skip heavy AI for tiny accessories
             if final_data["category"] not in ["ring", "earring", "bracelet"]:
                 ai_data, _ = await loop.run_in_executor(
                     None,
@@ -115,10 +83,10 @@ async def _process_single_item(item: dict, user_id: str):
         })
 
         # =========================
-        # 🔥 PARALLEL EMBEDDINGS
+        # 🔥 EMBEDDINGS (FIXED)
         # =========================
         text_future = loop.run_in_executor(None, encode_metadata, final_data)
-        image_future = loop.run_in_executor(None, encode_image_base64, masked_url)
+        image_future = loop.run_in_executor(None, encode_image_url, masked_url)
 
         text_vector, image_vector = await asyncio.gather(text_future, image_future)
 
@@ -135,7 +103,7 @@ async def _process_single_item(item: dict, user_id: str):
             similar_items = qdrant_service.search_similar(vector, user_id, limit=5)
 
         # =========================
-        # 💾 SAVE (NON-BLOCKING)
+        # 💾 SAVE
         # =========================
         if vector:
             await loop.run_in_executor(
@@ -159,33 +127,29 @@ async def _process_single_item(item: dict, user_id: str):
         print("[vision] item failed:", e)
         return None
 
+
 # =========================
 # 🔥 MAIN PIPELINE
 # =========================
-async def process_items(image: Image.Image, image_base64: str, user_id: str):
+async def process_items(image: Image.Image, user_id: str):
 
-    loop = asyncio.get_event_loop()
-
-    # BG removal (offloaded)
-    processed_base64, bg_removed, bg_error = await loop.run_in_executor(
-        None, lambda: _remove_bg_hf_sync(image_base64)
-    )
-
-    # Detection (your service)
+    # -------------------------
+    # 🔥 DETECTION
+    # -------------------------
     detections = await run_hybrid_detection(image)
 
     if not detections:
         return {
             "items": [],
             "meta": {
-                "bg_removed": bg_removed,
-                "bg_error": bg_error,
+                "bg_removed": True,
+                "bg_error": None,
             },
         }
 
-    # =========================
-    # 🔥 PARALLEL ITEM PROCESSING
-    # =========================
+    # -------------------------
+    # 🔥 PARALLEL PROCESSING
+    # -------------------------
     tasks = [_process_single_item(item, user_id) for item in detections]
     results = await asyncio.gather(*tasks)
 
@@ -194,10 +158,11 @@ async def process_items(image: Image.Image, image_base64: str, user_id: str):
     return {
         "items": results,
         "meta": {
-            "bg_removed": bg_removed,
-            "bg_error": bg_error,
+            "bg_removed": True,
+            "bg_error": None,
         },
     }
+
 
 # =========================
 # ROUTE
@@ -207,7 +172,7 @@ async def analyze_image(request: ImageAnalyzeRequest):
 
     image = _decode_pil_image(request.image_base64)
 
-    result = await process_items(image, request.image_base64, request.userId)
+    result = await process_items(image, request.userId)
 
     return {
         "success": True,

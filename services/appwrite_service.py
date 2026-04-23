@@ -1,4 +1,6 @@
 import os
+from functools import lru_cache
+from typing import Optional
 
 from appwrite.client import Client
 from appwrite.services.account import Account
@@ -6,7 +8,17 @@ from appwrite.services.databases import Databases
 from dotenv import load_dotenv
 
 
-def _env_first(*keys: str, default: str | None = None) -> str | None:
+# =========================
+# LOAD ENV (ONCE)
+# =========================
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+
+# =========================
+# ENV HELPERS
+# =========================
+def _env_first(*keys: str, default: Optional[str] = None) -> Optional[str]:
     for key in keys:
         value = os.getenv(key)
         if value:
@@ -14,54 +26,74 @@ def _env_first(*keys: str, default: str | None = None) -> str | None:
     return default
 
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
-
-client = Client()
-client.set_endpoint(
-    _env_first(
-        "APPWRITE_ENDPOINT",
-        "EXPO_PUBLIC_APPWRITE_ENDPOINT",
-        default="https://cloud.appwrite.io/v1",
-    )
-)
-client.set_project(
-    _env_first(
-        "APPWRITE_PROJECT_ID",
-        "APPWRITE_PROJECT",
-        "EXPO_PUBLIC_APPWRITE_PROJECT_ID",
-    )
+# =========================
+# CONFIG (VALIDATED)
+# =========================
+APPWRITE_ENDPOINT = _env_first(
+    "APPWRITE_ENDPOINT",
+    "EXPO_PUBLIC_APPWRITE_ENDPOINT",
+    default="https://cloud.appwrite.io/v1",
 )
 
-_appwrite_api_key = _env_first("APPWRITE_API_KEY", "APPWRITE_KEY")
-if _appwrite_api_key:
-    client.set_key(_appwrite_api_key)
+APPWRITE_PROJECT_ID = _env_first(
+    "APPWRITE_PROJECT_ID",
+    "APPWRITE_PROJECT",
+    "EXPO_PUBLIC_APPWRITE_PROJECT_ID",
+)
 
-account = Account(client)
-databases = Databases(client)
-
-
-def _build_client() -> Client:
-    local_client = Client()
-    local_client.set_endpoint(
-        _env_first(
-            "APPWRITE_ENDPOINT",
-            "EXPO_PUBLIC_APPWRITE_ENDPOINT",
-            default="https://cloud.appwrite.io/v1",
-        )
-    )
-    local_client.set_project(
-        _env_first(
-            "APPWRITE_PROJECT_ID",
-            "APPWRITE_PROJECT",
-            "EXPO_PUBLIC_APPWRITE_PROJECT_ID",
-        )
-    )
-    if _appwrite_api_key:
-        local_client.set_key(_appwrite_api_key)
-    return local_client
+APPWRITE_API_KEY = _env_first("APPWRITE_API_KEY", "APPWRITE_KEY")
 
 
+if not APPWRITE_PROJECT_ID:
+    raise RuntimeError("❌ APPWRITE_PROJECT_ID is required")
+
+
+# =========================
+# BASE CLIENT BUILDER
+# =========================
+def _create_base_client() -> Client:
+    client = Client()
+    client.set_endpoint(APPWRITE_ENDPOINT)
+    client.set_project(APPWRITE_PROJECT_ID)
+    return client
+
+
+# =========================
+# 🔥 ADMIN CLIENT (CACHED)
+# =========================
+@lru_cache(maxsize=1)
+def get_admin_client() -> Client:
+    client = _create_base_client()
+
+    if APPWRITE_API_KEY:
+        client.set_key(APPWRITE_API_KEY)
+
+    return client
+
+
+# =========================
+# 🔥 SERVICES (ADMIN)
+# =========================
+@lru_cache(maxsize=1)
+def get_account_service() -> Account:
+    return Account(get_admin_client())
+
+
+@lru_cache(maxsize=1)
+def get_database_service() -> Databases:
+    return Databases(get_admin_client())
+
+
+# =========================
+# 🔥 JWT CLIENT (PER REQUEST)
+# =========================
 def build_account_for_jwt(token: str) -> Account:
-    local_client = _build_client()
-    local_client.set_jwt(str(token or "").strip())
-    return Account(local_client)
+    token = str(token or "").strip()
+
+    if not token:
+        raise ValueError("JWT token is empty")
+
+    client = _create_base_client()
+    client.set_jwt(token)
+
+    return Account(client)

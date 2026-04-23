@@ -92,14 +92,8 @@ async def get_current_user(request: Request):
         return payload
     except HTTPException:
         raise
-<<<<<<< HEAD
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-=======
     except Exception as e:
         error_str = str(e).lower()
         if "timeout" in error_str or "connection" in error_str or "name or service not known" in error_str:
             raise HTTPException(status_code=503, detail="Auth service temporarily unavailable")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)

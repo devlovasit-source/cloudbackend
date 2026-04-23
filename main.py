@@ -91,19 +91,11 @@ reddit_router = _load_optional_router("routers.reddit")
 bg_router = None
 if os.getenv("ENABLE_BG_REMOVER", "false").lower() in ("1", "true", "yes"):
     if all(_has_module(m) for m in ["transformers", "torch", "PIL"]):
-<<<<<<< HEAD
-        bg_router = _load_optional_router("routers.bg_remover")
-    else:
-        _mark_router_skipped("routers.bg_remover", "missing_dependency")
-else:
-    _mark_router_skipped("routers.bg_remover", "feature_flag_disabled")
-=======
         bg_router = _load_optional_router("routers.bg_router")
     else:
         _mark_router_skipped("routers.bg_router", "missing_dependency")
 else:
     _mark_router_skipped("routers.bg_router", "feature_flag_disabled")
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 vision_router = None
 if os.getenv("ENABLE_VISION", "false").lower() in ("1", "true", "yes"):
@@ -115,11 +107,7 @@ else:
     _mark_router_skipped("routers.vision", "feature_flag_disabled")
 
 wardrobe_capture_router = None
-<<<<<<< HEAD
-if os.getenv("ENABLE_VISION", "false").lower() in ("1", "true", "yes"):
-=======
 if os.getenv("ENABLE_WARDROBE_CAPTURE", "false").lower() in ("1", "true", "yes"):
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     if all(_has_module(m) for m in ["numpy", "PIL"]):
         wardrobe_capture_router = _load_optional_router("routers.wardrobe_capture")
     else:
@@ -542,44 +530,6 @@ class BgCompatRequest(BaseModel):
 @app.post("/api/background/remove-bg")
 @app.post("/api/remove-bg")
 def remove_bg_compat(payload: BgCompatRequest):
-<<<<<<< HEAD
-    """
-    Always expose background-removal endpoint even when optional router gating
-    prevents router mounting. This keeps frontend flow stable.
-    """
-    image_base64 = payload.image_base64
-
-    try:
-        from routers.bg_remover import remove_background_sync
-    except Exception as exc:
-        # Return a hard failure so clients do not treat this as a successful cutout.
-        raise HTTPException(
-            status_code=503,
-            detail=f"BG remover unavailable: {exc}",
-        )
-
-    try:
-        result = remove_background_sync(image_base64)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Background removal failed: {exc}",
-        )
-    if not isinstance(result, dict) or result.get("bg_removed") is not True:
-        fallback = result.get("fallback_reason") if isinstance(result, dict) else "Background removal failed"
-        raise HTTPException(
-            status_code=503,
-            detail=fallback or "Background removal failed",
-        )
-    logger.info(
-        "bg compat result %s",
-        {
-            "bg_removed": result.get("bg_removed"),
-            "fallback_reason": result.get("fallback_reason"),
-        },
-    )
-    return result
-=======
     try:
         from services.bg_service import remove_bg_bytes
         import base64
@@ -596,7 +546,6 @@ def remove_bg_compat(payload: BgCompatRequest):
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Background removal failed: {exc}")
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 
 class VisionCompatRequest(BaseModel):
@@ -605,67 +554,6 @@ class VisionCompatRequest(BaseModel):
     userId: str | None = None
 
 
-<<<<<<< HEAD
-@app.post("/api/analyze-image")
-@app.post("/api/vision/analyze-image")
-@app.post("/api/vision/analyze")
-@app.post("/api/analyze")
-def analyze_compat(payload: VisionCompatRequest):
-    """
-    Backward-compatible image analysis endpoints expected by older frontend builds.
-    """
-    try:
-        from routers.vision import vision_analyze_core
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Analyze endpoint unavailable: {exc}")
-
-    user_id = str(payload.user_id or payload.userId or "demo_user").strip() or "demo_user"
-    try:
-        core = vision_analyze_core(payload.image_base64, user_id)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Vision analysis failed: {exc}")
-
-    if not isinstance(core, dict):
-        raise HTTPException(status_code=502, detail="Vision analyzer returned invalid payload")
-
-    analysis = core.get("data") if isinstance(core.get("data"), dict) else {}
-    meta = core.get("meta") if isinstance(core.get("meta"), dict) else {}
-    similar_items = core.get("similar_items") if isinstance(core.get("similar_items"), list) else []
-    duplicate = {
-        "is_duplicate": bool(meta.get("probable_duplicate")),
-        "id": meta.get("image_duplicate_point_id") or meta.get("pixel_duplicate_point_id"),
-        "score": float(meta.get("top_similarity_score") or meta.get("image_duplicate_score") or 0.0),
-    }
-
-    return {
-        "success": True,
-        "data": analysis,
-        "processed_image_base64": core.get("processed_image_base64") or payload.image_base64,
-        "items": [
-            {
-                "id": str(analysis.get("name") or "item"),
-                "name": analysis.get("name"),
-                "category": analysis.get("category"),
-                "sub_category": analysis.get("sub_category"),
-                "color_code": analysis.get("color_code"),
-                "pattern": analysis.get("pattern"),
-                "occasions": analysis.get("occasions", []),
-            }
-        ],
-        "similar_items": similar_items,
-        "duplicate": duplicate,
-        "meta": {
-            "vision_model_used": meta.get("vision_model_used"),
-            "duplicate_threshold": meta.get("duplicate_threshold") or meta.get("image_duplicate_threshold"),
-            "llm_only": bool(meta.get("llm_fallback")),
-            "analysis_source": "ollama",
-            "llm_fallback": bool(meta.get("llm_fallback")),
-            "bg_removed": meta.get("bg_removed"),
-        },
-    }
-=======
 if not vision_router:
     @app.post("/api/analyze-image")
     @app.post("/api/vision/analyze-image")
@@ -676,7 +564,6 @@ if not vision_router:
             status_code=503,
             detail="Vision analyzer is currently disabled on this server.",
         )
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 @app.get("/")
 def root():
     return {"message": "AHVI backend running"}
@@ -691,12 +578,6 @@ async def health_check():
     ]
     redis_ready = await is_redis_rate_limit_ready()
     qdrant_ready = bool(getattr(qdrant_service, "client", None))
-<<<<<<< HEAD
-    appwrite_configured = all(
-        str(os.getenv(key, "")).strip()
-        for key in ("APPWRITE_ENDPOINT", "APPWRITE_PROJECT_ID", "APPWRITE_DATABASE_ID")
-    )
-=======
     appwrite_endpoint = str(
         os.getenv("APPWRITE_ENDPOINT", "")
         or os.getenv("EXPO_PUBLIC_APPWRITE_ENDPOINT", "")
@@ -711,7 +592,6 @@ async def health_check():
         or os.getenv("EXPO_PUBLIC_APPWRITE_DATABASE_ID", "")
     ).strip()
     appwrite_configured = all((appwrite_endpoint, appwrite_project, appwrite_database))
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     celery_ready = bool(celery_app and AsyncResult is not None)
 
     ready = not required_router_failures

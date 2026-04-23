@@ -1,10 +1,6 @@
 import base64
 from fastapi import APIRouter, HTTPException
-<<<<<<< HEAD
-from pydantic import BaseModel, validator
-=======
 from pydantic import BaseModel, field_validator
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 from services.bg_service import remove_bg_bytes
 
@@ -17,12 +13,8 @@ router = APIRouter(prefix="/bg", tags=["background-removal"])
 class BGRemoveRequest(BaseModel):
     image_base64: str
 
-<<<<<<< HEAD
-    @validator("image_base64")
-=======
     @field_validator("image_base64")
     @classmethod
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     def validate_base64(cls, v):
         if not v or len(v) < 100:
             raise ValueError("Invalid image data")

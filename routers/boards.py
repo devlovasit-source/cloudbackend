@@ -1,11 +1,7 @@
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
-<<<<<<< HEAD
-from pydantic import BaseModel, Field, validator
-=======
 from pydantic import BaseModel, Field, field_validator
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
 
 from services.board_service import (
     AppwriteProxyError,
@@ -40,23 +36,15 @@ class SaveBoardRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
     # 🔥 validation
-<<<<<<< HEAD
-    @validator("user_id")
-=======
     @field_validator("user_id")
     @classmethod
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     def validate_user(cls, v):
         if not v:
             raise ValueError("user_id is required")
         return v
 
-<<<<<<< HEAD
-    @validator("title")
-=======
     @field_validator("title")
     @classmethod
->>>>>>> ba59b6b (Fix routing imports, Pydantic v2 validators, chat cache thread safety, and auth error handling)
     def validate_title(cls, v):
         return v.strip() or "Style Board"
 

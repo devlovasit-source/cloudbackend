@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from PIL import Image
 import requests
 
-from services.detection_pipeline import run_hybrid_detection
+from services.hybrid_detection_service import run_hybrid_detection
 from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_base64
 from services.qdrant_service import qdrant_service

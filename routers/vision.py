@@ -1,6 +1,5 @@
 import base64
 import io
-import os
 import asyncio
 from typing import List, Optional
 
@@ -8,13 +7,25 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from PIL import Image
 
-from services.hybrid_detection_service import run_hybrid_detection
 from services.embedding_service import encode_metadata
 from services.image_embedding_service import encode_image_url
 from services.qdrant_service import qdrant_service
 from services import ai_gateway
 
 router = APIRouter()
+
+
+# =========================
+# LAZY DETECTION LOADER 🔥
+# =========================
+def get_detection_service():
+    try:
+        from services.hybrid_detection_service import run_hybrid_detection
+        return run_hybrid_detection
+    except Exception as e:
+        print("[vision] detection unavailable:", e)
+        return None
+
 
 # =========================
 # REQUEST
@@ -41,7 +52,7 @@ def _decode_pil_image(image_base64: str) -> Image.Image:
 
 
 # =========================
-# 🔥 PROCESS SINGLE ITEM
+# PROCESS SINGLE ITEM
 # =========================
 async def _process_single_item(item: dict, user_id: str):
     try:
@@ -59,7 +70,7 @@ async def _process_single_item(item: dict, user_id: str):
         loop = asyncio.get_running_loop()
 
         # =========================
-        # 🔥 AI ENRICHMENT
+        # AI ENRICHMENT
         # =========================
         ai_data = {}
 
@@ -83,7 +94,7 @@ async def _process_single_item(item: dict, user_id: str):
         })
 
         # =========================
-        # 🔥 EMBEDDINGS (FIXED)
+        # EMBEDDINGS
         # =========================
         text_future = loop.run_in_executor(None, encode_metadata, final_data)
         image_future = loop.run_in_executor(None, encode_image_url, masked_url)
@@ -96,14 +107,14 @@ async def _process_single_item(item: dict, user_id: str):
             vector = image_vector or text_vector or []
 
         # =========================
-        # 🔍 SEARCH
+        # SEARCH
         # =========================
         similar_items = []
         if vector:
             similar_items = qdrant_service.search_similar(vector, user_id, limit=5)
 
         # =========================
-        # 💾 SAVE
+        # SAVE
         # =========================
         if vector:
             await loop.run_in_executor(
@@ -129,14 +140,24 @@ async def _process_single_item(item: dict, user_id: str):
 
 
 # =========================
-# 🔥 MAIN PIPELINE
+# MAIN PIPELINE
 # =========================
 async def process_items(image: Image.Image, user_id: str):
 
-    # -------------------------
-    # 🔥 DETECTION
-    # -------------------------
-    detections = await run_hybrid_detection(image)
+    # =========================
+    # DETECTION (SAFE)
+    # =========================
+    detections = []
+
+    try:
+        run_hybrid_detection = get_detection_service()
+
+        if run_hybrid_detection:
+            detections = await run_hybrid_detection(image)
+        else:
+            print("[vision] detection disabled")
+    except Exception as e:
+        print("[vision] detection failed:", e)
 
     if not detections:
         return {
@@ -144,12 +165,13 @@ async def process_items(image: Image.Image, user_id: str):
             "meta": {
                 "bg_removed": True,
                 "bg_error": None,
+                "detection": "disabled_or_failed"
             },
         }
 
-    # -------------------------
-    # 🔥 PARALLEL PROCESSING
-    # -------------------------
+    # =========================
+    # PARALLEL PROCESSING
+    # =========================
     tasks = [_process_single_item(item, user_id) for item in detections]
     results = await asyncio.gather(*tasks)
 
@@ -160,6 +182,7 @@ async def process_items(image: Image.Image, user_id: str):
         "meta": {
             "bg_removed": True,
             "bg_error": None,
+            "detection": "success"
         },
     }
 

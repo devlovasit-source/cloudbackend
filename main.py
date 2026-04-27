@@ -300,6 +300,25 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    request_id = str(getattr(request.state, "request_id", "") or "")
+    detail = exc.detail
+    message = detail.get("message") if isinstance(detail, dict) else str(detail or "Request failed")
+    code = detail.get("code") if isinstance(detail, dict) else "HTTP_ERROR"
+    content = {
+        "success": False,
+        "request_id": request_id,
+        "detail": detail,
+        "error": {
+            "code": str(code or "HTTP_ERROR"),
+            "message": message,
+        },
+    }
+    headers = getattr(exc, "headers", None)
+    return JSONResponse(status_code=exc.status_code, content=content, headers=headers)
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     request_id = str(getattr(request.state, "request_id", "") or "")
@@ -442,50 +461,41 @@ async def rate_limit_middleware(request: Request, call_next):
 # -------------------------
 # ROUTER REGISTRATION
 # -------------------------
-if chat_router:
-    app.include_router(chat_router, prefix="/api", tags=["Chat"])
+API_DOMAINS = [
+    {"domain": "chat", "module": "routers.chat", "router": chat_router, "prefix": "/api", "tags": ["Chat"]},
+    {"domain": "data", "module": "routers.data", "router": data_router, "prefix": "", "tags": None},
+    {"domain": "utilities", "module": "routers.utilities", "router": utilities_router, "prefix": "", "tags": None},
+    {"domain": "boards", "module": "routers.boards", "router": boards_router, "prefix": "", "tags": None},
+    {"domain": "ai", "module": "api.ai", "router": ai_router, "prefix": "/api", "tags": ["AI"]},
+    {"domain": "feedback", "module": "routers.feedback", "router": feedback_router, "prefix": "", "tags": ["Feedback"]},
+    {"domain": "ops", "module": "routers.ops", "router": ops_router, "prefix": "/api/ops", "tags": ["Ops"]},
+    {"domain": "calendar", "module": "routers.calendar", "router": calendar_router, "prefix": "/api", "tags": None},
+    {"domain": "notifications", "module": "routers.notifications", "router": notifications_router, "prefix": "", "tags": None},
+    {"domain": "stylist", "module": "routers.stylist", "router": stylist_router, "prefix": "/api/stylist", "tags": None},
+    {"domain": "reddit", "module": "routers.reddit", "router": reddit_router, "prefix": "", "tags": None},
+    {"domain": "vision", "module": "routers.vision", "router": vision_router, "prefix": "/api/vision", "tags": None},
+    {"domain": "wardrobe", "module": "routers.wardrobe_capture", "router": wardrobe_capture_router, "prefix": "", "tags": None},
+    {"domain": "background", "module": "routers.bg_remover", "router": bg_router, "prefix": "/api/background", "tags": None},
+    {"domain": "garment", "module": "routers.garment_analyzer", "router": garment_router, "prefix": "/api", "tags": None},
+]
 
-if data_router:
-    app.include_router(data_router)
 
-if utilities_router:
-    app.include_router(utilities_router)
+def _include_domain_router(spec: dict[str, Any]) -> None:
+    router = spec.get("router")
+    if not router:
+        return
+    kwargs: dict[str, Any] = {}
+    prefix = str(spec.get("prefix") or "")
+    tags = spec.get("tags")
+    if prefix:
+        kwargs["prefix"] = prefix
+    if tags:
+        kwargs["tags"] = tags
+    app.include_router(router, **kwargs)
 
-if boards_router:
-    app.include_router(boards_router)
 
-if ai_router:
-    app.include_router(ai_router, prefix="/api", tags=["AI"])
-
-if feedback_router:
-    app.include_router(feedback_router, tags=["Feedback"])
-
-if ops_router:
-    app.include_router(ops_router, prefix="/api/ops", tags=["Ops"])
-
-if calendar_router:
-    app.include_router(calendar_router, prefix="/api")
-
-if notifications_router:
-    app.include_router(notifications_router)
-
-if stylist_router:
-    app.include_router(stylist_router, prefix="/api/stylist")
-
-if reddit_router:
-    app.include_router(reddit_router)
-
-if vision_router:
-    app.include_router(vision_router, prefix="/api/vision")
-
-if wardrobe_capture_router:
-    app.include_router(wardrobe_capture_router)
-
-if bg_router:
-    app.include_router(bg_router, prefix="/api/background")
-
-if garment_router:
-    app.include_router(garment_router, prefix="/api")
+for domain_spec in API_DOMAINS:
+    _include_domain_router(domain_spec)
 
 if not chat_router:
     class _FallbackMessage(BaseModel):
@@ -684,11 +694,24 @@ def health_routes():
         for name, row in ROUTER_LOAD_STATUS.items()
         if bool((row or {}).get("required")) and str((row or {}).get("status")) != "loaded"
     ]
+    domains = []
+    for spec in API_DOMAINS:
+        module_name = str(spec.get("module") or "")
+        domains.append(
+            {
+                "domain": spec.get("domain"),
+                "module": module_name,
+                "prefix": spec.get("prefix") or "",
+                "mounted": bool(spec.get("router")),
+                "load_status": ROUTER_LOAD_STATUS.get(module_name, {}).get("status", "unknown"),
+            }
+        )
     return {
         "status": "online" if not required_router_failures else "degraded",
         "strict_router_loading": settings.strict_router_loading,
         "required_routers": sorted(REQUIRED_ROUTERS),
         "required_router_failures": required_router_failures,
+        "domains": domains,
         "routers": ROUTER_LOAD_STATUS,
     }
 

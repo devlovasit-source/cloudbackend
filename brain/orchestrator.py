@@ -501,13 +501,14 @@ class AhviOrchestrator:
             "data": {},
         }
         fallback = response_assembler.assemble(merged_output=merged, context={"user_profile": user_profile, "signals": {"context_mode": "home"}})
+        fallback_message = _safe_text(_dict(fallback.get("message")).get("content")) if isinstance(fallback, dict) else ""
         return {
             "success": True,
-            "message": fallback,
+            "message": fallback_message or _safe_text(merged.get("message")),
             "board": "general",
             "type": "text",
-            "cards": [],
-            "data": {},
+            "cards": fallback.get("cards", []) if isinstance(fallback, dict) else [],
+            "data": fallback.get("data", {}) if isinstance(fallback, dict) else {},
             "meta": {"intent": intent, "confidence": float(intent_row.get("confidence", 0.0))},
         }
 

@@ -29,6 +29,10 @@ def _contains_word(text: str, words: List[str]) -> bool:
     return any(w in text for w in words)
 
 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -469,7 +473,7 @@ def _combo_patterns(combo: Dict[str, Any]) -> List[str]:
     patterns: List[str] = []
     for part in ("master_piece", "top", "bottom", "shoes", "dress"):
         item = combo.get(part, {}) or {}
-        p = str(item.get("fabric", "")).strip().lower()
+        p = str(item.get("pattern") or item.get("fabric") or "").strip().lower()
         if p:
             patterns.append(p)
     return patterns
@@ -530,6 +534,17 @@ Rules:
         return normalized[:8]
     except Exception:
         return []
+
+
+def _pipeline_contract(stages: List[str], *, status: str, reason: str = "") -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "status": status,
+        "stages": stages,
+        "completed_stage": stages[-1] if stages else "",
+    }
+    if reason:
+        payload["reason"] = reason
+    return payload
 
 
 def _rule_color_fallback(master_piece: Dict[str, Any], combos: List[Dict[str, Any]]) -> List[str]:
@@ -1116,12 +1131,14 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
             "cards": [],
             "boards": [],
             "normalized_wardrobe": wardrobe,
-            "pipeline": {
-                "stages": [
+            "pipeline": _pipeline_contract(
+                [
                     "clarifying_questions",
                     "occasion_intent_capture",
-                ]
-            },
+                ],
+                status="needs_input",
+                reason="missing_occasion",
+            ),
             "clarifying_questions": [
                 "Which occasion is this for?",
                 "Do you want an outfit around a top or a dress?",
@@ -1143,13 +1160,15 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
             "cards": [],
             "boards": [],
             "normalized_wardrobe": wardrobe,
-            "pipeline": {
-                "stages": [
+            "pipeline": _pipeline_contract(
+                [
                     "occasion_intent_capture",
                     "occasion_wardrobe_filter",
                     "master_piece_selection",
-                ]
-            },
+                ],
+                status="empty",
+                reason="no_master_piece",
+            ),
         }
 
     master_type, master_piece = master_candidates[0]
@@ -1183,14 +1202,16 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
             "cards": [],
             "boards": [],
             "normalized_wardrobe": wardrobe,
-            "pipeline": {
-                "stages": [
+            "pipeline": _pipeline_contract(
+                [
                     "occasion_intent_capture",
                     "occasion_wardrobe_filter",
                     "master_piece_selection",
                     "combo_construction",
-                ]
-            },
+                ],
+                status="empty",
+                reason="missing_required_parts",
+            ),
         }
 
     color_keep = _llm_filter_combo_ids(
@@ -1301,7 +1322,7 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
 
         ranked.sort(
             key=lambda o: (
-                float(_dict(o.get("score_meta") or o.get("unified_style")).get("score") or 0.0),
+                float(_as_dict(o.get("score_meta") or o.get("unified_style")).get("score") or 0.0),
                 float(o.get("rank_score", o.get("score", 0.0)) or 0.0),
             ),
             reverse=True,
@@ -1337,7 +1358,8 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
         "board_item_ids": board_item_ids,
         "normalized_wardrobe": wardrobe,
         "pipeline": {
-            "stages": [
+            **_pipeline_contract(
+                [
                 "clarifying_questions_if_needed",
                 "occasion_intent_capture",
                 "occasion_wardrobe_filter",
@@ -1350,7 +1372,9 @@ def get_daily_outfits(user: Dict[str, Any]) -> Dict[str, Any]:
                 "explanation_generation",
                 "tryon_payload",
                 "frontend",
-            ],
+                ],
+                status="completed",
+            ),
             "scoring_components": [
                 "occasion rules",
                 "color intelligence",

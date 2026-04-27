@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 router = APIRouter()
 
 
+@router.get("/health")
+def ops_health():
+    return {"status": "online", "ready": True, "domain": "ops"}
+
+
 def _gpu_metrics() -> dict:
     try:
         out = subprocess.check_output(

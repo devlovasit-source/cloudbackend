@@ -1,6 +1,5 @@
 
 from typing import Any, Dict, List
-import random
 import itertools
 
 from brain.engines.style_graph_engine import style_graph_engine
@@ -87,20 +86,19 @@ class OutfitEngine:
     def _generate_candidates(self, tops, bottoms, shoes, layers, accessories):
 
         combos = list(itertools.product(tops, bottoms, shoes))
-        random.shuffle(combos)
         combos = combos[:30]
 
         candidates = []
 
-        for top, bottom, shoe in combos:
+        for idx, (top, bottom, shoe) in enumerate(combos):
 
             items = [top, bottom, shoe]
 
-            if layers and random.random() > 0.5:
-                items.append(random.choice(layers))
+            if layers and idx % 2 == 0:
+                items.append(layers[idx % len(layers)])
 
-            if accessories and random.random() > 0.5:
-                items.append(random.choice(accessories))
+            if accessories and idx % 2 == 1:
+                items.append(accessories[idx % len(accessories)])
 
             candidates.append(items)
 

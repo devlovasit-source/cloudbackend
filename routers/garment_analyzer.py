@@ -1,5 +1,5 @@
-
-from fastapi import APIRouter, File, UploadFile, HTTPException
+import base64
+from fastapi import APIRouter, HTTPException
 from PIL import Image
 from transformers import pipeline
 import io
@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 from sklearn.cluster import KMeans
 from collections import Counter
+import threading
+from pydantic import BaseModel, Field
 
 # 🔥 NEW: image embedding
 from services.image_embedding_service import encode_image_bytes
@@ -19,9 +21,23 @@ router = APIRouter(
     tags=["Garment Analyzer"]
 )
 
-print("Loading Garment Classification Model (CLIP)...")
-classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
-print("Garment Model loaded successfully!")
+_classifier = None
+_classifier_lock = threading.Lock()
+
+
+def _get_classifier():
+    """
+    Lazy-load CLIP pipeline on first request.
+    Import-time model loading makes the whole API feel "hung" on startup.
+    """
+    global _classifier
+    if _classifier is not None:
+        return _classifier
+    with _classifier_lock:
+        if _classifier is not None:
+            return _classifier
+        _classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
+        return _classifier
 
 # =========================
 # CATEGORIES
@@ -81,10 +97,21 @@ def get_dominant_color(cv_image, k=4):
 # =========================
 # MAIN API
 # =========================
+class GarmentAnalyzeRequest(BaseModel):
+    image_base64: str = Field(..., min_length=20)
+    filename: str | None = None
+
+
 @router.post("/analyze/")
-def analyze_garment(image_file: UploadFile = File(...)):
+def analyze_garment(payload: GarmentAnalyzeRequest):
     try:
-        contents = image_file.file.read()
+        raw = str(payload.image_base64 or "").strip()
+        if "," in raw:
+            raw = raw.split(",", 1)[1]
+        try:
+            contents = base64.b64decode(raw, validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image: {exc}")
         if not contents:
             raise HTTPException(status_code=400, detail="Empty image")
 
@@ -113,6 +140,7 @@ def analyze_garment(image_file: UploadFile = File(...)):
         # =========================
         # MAIN CATEGORY
         # =========================
+        classifier = _get_classifier()
         main_results = classifier(
             pil_image,
             candidate_labels=MAIN_CATEGORIES,
@@ -148,7 +176,7 @@ def analyze_garment(image_file: UploadFile = File(...)):
 
         return {
             "status": "success",
-            "filename": image_file.filename,
+            "filename": payload.filename,
 
             # classification
             "item_name": item_name,

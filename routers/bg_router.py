@@ -25,13 +25,13 @@ class BGRemoveRequest(BaseModel):
 # ROUTE (SYNC)
 # =========================
 @router.post("/remove")
-def remove_background(request: BGRemoveRequest):
+async def remove_background(request: BGRemoveRequest):
     try:
         # decode
         image_bytes = base64.b64decode(request.image_base64.split(",")[-1])
 
         # process (🔥 core service)
-        result_bytes = remove_bg_bytes(image_bytes)
+        result_bytes = await remove_bg_bytes(image_bytes)
 
         # encode response
         result_base64 = base64.b64encode(result_bytes).decode()

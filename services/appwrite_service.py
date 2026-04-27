@@ -44,14 +44,16 @@ APPWRITE_PROJECT_ID = _env_first(
 APPWRITE_API_KEY = _env_first("APPWRITE_API_KEY", "APPWRITE_KEY")
 
 
-if not APPWRITE_PROJECT_ID:
-    raise RuntimeError("❌ APPWRITE_PROJECT_ID is required")
+def is_appwrite_configured() -> bool:
+    return bool(str(APPWRITE_PROJECT_ID or "").strip())
 
 
 # =========================
 # BASE CLIENT BUILDER
 # =========================
 def _create_base_client() -> Client:
+    if not is_appwrite_configured():
+        raise RuntimeError("APPWRITE_PROJECT_ID is not configured")
     client = Client()
     client.set_endpoint(APPWRITE_ENDPOINT)
     client.set_project(APPWRITE_PROJECT_ID)

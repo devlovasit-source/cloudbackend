@@ -23,6 +23,7 @@ class QdrantService:
     def __init__(self):
         self.url = os.getenv("QDRANT_URL")
         self.api_key = os.getenv("QDRANT_API_KEY")
+        self.timeout_seconds = float(os.getenv("QDRANT_TIMEOUT_SECONDS", "2.5") or "2.5")
 
         self.collection = os.getenv("QDRANT_COLLECTION", "wardrobe")
         self.memory_collection = os.getenv("QDRANT_MEMORY_COLLECTION", "outfit_memory")
@@ -37,7 +38,13 @@ class QdrantService:
 
         if self.url:
             try:
-                self.client = QdrantClient(url=self.url, api_key=self.api_key)
+                # Critical: enforce low default timeouts so app startup never hangs
+                # when Qdrant is misconfigured or unreachable.
+                self.client = QdrantClient(
+                    url=self.url,
+                    api_key=self.api_key,
+                    timeout=self.timeout_seconds,
+                )
             except Exception as e:
                 print("❌ Qdrant init failed:", str(e))
 

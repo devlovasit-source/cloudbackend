@@ -529,7 +529,7 @@ class BgCompatRequest(BaseModel):
 
 @app.post("/api/background/remove-bg")
 @app.post("/api/remove-bg")
-def remove_bg_compat(payload: BgCompatRequest):
+async def remove_bg_compat(payload: BgCompatRequest):
     try:
         from services.bg_service import remove_bg_bytes
         import base64
@@ -538,7 +538,7 @@ def remove_bg_compat(payload: BgCompatRequest):
 
     try:
         image_bytes = base64.b64decode(payload.image_base64.split(",")[-1])
-        result_bytes = remove_bg_bytes(image_bytes)
+        result_bytes = await remove_bg_bytes(image_bytes)
         return {
             "success": True,
             "bg_removed": True,

@@ -1,6 +1,7 @@
 import base64
-import imghdr
+import io
 from fastapi import HTTPException
+from PIL import Image
 from services.r2_storage import R2Storage
 
 
@@ -26,7 +27,16 @@ def _validate_image(image_bytes: bytes, max_size: int, field_name: str):
             detail=f"{field_name} too large (max {max_size // (1024 * 1024)}MB)"
         )
 
-    img_type = imghdr.what(None, h=image_bytes)
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img_type = str((img.format or "")).lower()
+    except Exception:
+        img_type = ""
+
+    # PIL returns "jpeg" for jpg
+    if img_type == "jpg":
+        img_type = "jpeg"
+
     if img_type not in ALLOWED_TYPES:
         raise HTTPException(
             status_code=400,
